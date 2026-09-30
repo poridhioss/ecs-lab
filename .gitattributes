@@ -1,0 +1,5 @@
+# Scripts run on Linux (workspace and EC2); CRLF breaks them.
+*.sh  text eol=lf
+*.tpl text eol=lf
+*.tf  text eol=lf
+*.py  text eol=lf

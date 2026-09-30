@@ -293,22 +293,18 @@ Expect several rounds per lab. In the CKA series, most first drafts had at least
 
 How the platform facts above collide with `lab-plan-bare-minimum.md`. **Resolve these before writing Lab 01.**
 
-### 8.1 🔴 The planned control node may not be allowed
+### 8.1 🔴 Only `t3.medium` is confirmed, so the platform is split across machines
 
-The plan puts **everything** on one **`t3.xlarge` (16 GB)** `control-01`: FastAPI, Postgres, Temporal, Authentik, Elasticsearch, Kibana, Prometheus, Grafana and Redis. But the only instance types confirmed allowed are **`t2.micro` and `t3.medium` (4 GB)**. `t3.large` and `t3.xlarge` have never been tested.
+An earlier plan put everything on one `t3.xlarge` (16 GB). The only instance types confirmed allowed are **`t2.micro` and `t3.medium` (4 GB)**, and a 16 GB all-in-one box may be impossible. Elasticsearch alone wants 2–4 GB, and Authentik plus its Postgres about 2 GB. The bare-minimum plan therefore uses a split layout of `t3.medium`s, provisioned per lab (the authoritative table is in `CLAUDE.md`):
 
-**First action:** run the `--dry-run` probe from Section 5.2 for `t3.large`, `t3.xlarge` and `t3.2xlarge`, and ideally read the full policy with `aws iam get-user-policy`.
-
-If only `t3.medium` is allowed, a 16 GB all-in-one box is impossible. Elasticsearch alone wants 2–4 GB, and Authentik plus its Postgres and Redis about 2 GB. The platform would need splitting across several `t3.medium`s, for example:
-
-| Machine | Would run |
+| Machine | Runs |
 |---|---|
-| `control-01` | FastAPI, Postgres, Temporal, Temporal UI, Redis |
+| `control-01` | FastAPI, Postgres, Temporal, Temporal UI, Redis, Prometheus, Grafana |
+| `obs-01` | Elasticsearch, Kibana |
 | `auth-01` | Authentik |
-| `obs-01` | Elasticsearch, Kibana, Prometheus, Grafana |
 | `node-01`, `node-02` | Agent, Docker, Fluent Bit, Node Exporter |
 
-That is five instances, and ⚠️ whether the account caps the number of instances is also unknown.
+The capstone needs all five. ⚠️ Whether larger types are allowed, and whether the account caps the number of instances, is checked by the Lab 00 platform check (`docs/labs/lab-00-platform-check/`).
 
 ### 8.2 🔴 Labs build on each other; environments don't persist
 
@@ -322,7 +318,9 @@ Students need browser access to Temporal UI (8233), Authentik (9000), Kibana (56
 - **Poridhi Load Balancer** pointed at the EC2 public IP — ⚠️ unknown whether it supports external targets.
 - **`ssh -L` tunnel from the workspace** — the plan suggests this for Temporal UI, but the tunnel ends on the *workspace's* localhost, and ⚠️ whether the student's own browser can reach that is unknown. It may work through code-server's port forwarding.
 
-**Authentik makes this harder.** The OAuth redirect URI and issuer URL must exactly match the URL the browser uses, and **EC2 public IPs change on every provision** — so they change every lab. The redirect URI configuration must be **templated and re-applied by the catch-up script**. An Elastic IP is an alternative, if the policy allows it (⚠️ unknown). Test a real browser login through whichever access method is chosen **before** writing Lab 04.
+**Authentik makes this harder.** The OAuth redirect URI and issuer URL must exactly match the URL the browser uses, and **EC2 public IPs change on every provision** — so they change every lab. The redirect URI configuration must be **templated and re-applied by the catch-up script**. An Elastic IP is an alternative, if the policy allows it (⚠️ unknown). Test a real browser login through whichever access method is chosen **before** writing the SSO lab (Lab 06).
+
+A second browser trap: **`crypto.subtle` (needed for PKCE S256) only exists in secure contexts**, meaning HTTPS or `localhost`. A page served from `http://<public-ip>:8000` doesn't have it, so the Web UI must let the control plane exchange the authorization code rather than doing PKCE in browser JavaScript.
 
 ### 8.4 Things that should just work on EC2
 
@@ -349,5 +347,9 @@ The **workspace** (a Poridhi VM, holding the credentials, key and Terraform stat
 | 6 | Are Elastic IPs allowed? | Stable redirect URIs for Authentik (8.3) |
 | 7 | Does Poridhi's lab renderer support `<details>`? | Hidden solutions and hints |
 | 8 | What Python version is in the workspace, and is Docker there? | Whether anything can run locally before EC2 |
+| 9 | Is `rsync` in the workspace and on the EC2 AMI? | `scripts/push.sh` depends on it |
+| 10 | How long does `terraform apply` + Docker bootstrap take? | Catch-up time budget (target < 10 min) |
+| 11 | EC2 facts: NIC name, MTU, `vxlan` module, Python version, Docker Hub pulls | VXLAN lab, agent runtime |
+| 12 | Are EBS volumes above 8 GB allowed? | Docker images for Elasticsearch, Temporal, Authentik need room |
 
 Record each answer back into this file, moving it from ⚠️ to ✅, so the next person inherits facts instead of guesses.

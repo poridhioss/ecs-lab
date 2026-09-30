@@ -48,7 +48,7 @@ Each tenant:
 
 | # | Folder | Student-facing title | Status |
 |---|---|---|---|
-| 00 | — | Platform check (author only, not published) | not started |
+| 00 | `lab-00-platform-check` | Platform check (author only, not published) | kit drafted, not run |
 | 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | not started |
 | 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
@@ -93,14 +93,17 @@ Do not change these without asking.
 - **Network:** VPC `10.0.0.0/16`, public subnet `10.0.1.0/24`, security group with SSH from anywhere + **one `self = true` rule for all internal traffic** + browser-facing UI ports from anywhere
 - **Browser access to UIs:** EC2 public IP + opened port (⚠️ to verify in Lab 00). No SSH tunnels in student steps.
 - **Control plane:** FastAPI + Postgres. Also serves `web-ui/index.html` (same origin, no CORS).
-- **Orchestration:** Temporal Python SDK; task queue per node named after the **registered node ID** (`node-01`), never the hostname
+- **Code delivery:** students edit code in the workspace VS Code; `scripts/push.sh` rsyncs it to the EC2 machines and restarts services. Catch-up uses the same script. EC2 machines never clone the repo.
+- **Orchestration:** Temporal Python SDK; task queue per node named after the **registered node ID** (`node-01`), never the hostname. Activities run on the node queues; **workflows run on a worker on `control-01`** (task queue `lifecycle`), so a dead node can still be marked `failed`.
 - **Agent → control plane:** HTTP with a shared agent token
 - **Users → control plane:** Authentik JWT (RS256, JWKS); `tenant_id` from the `groups` claim, **never** from the request body
+- **Browser login:** authorization code flow with the **code exchanged by the control plane** (`/callback`, confidential client with a secret). Not browser PKCE: `crypto.subtle` doesn't exist on a plain-HTTP public-IP origin.
 - **Authentik config:** created by script (blueprints or API), with issuer and redirect URIs templated from the current session's public IPs. Never by clicking in the UI.
 - **Containers:** Docker SDK for Python; labels `tenant_id`, `node_id`
 - **Networking:** per-tenant Docker bridge network with a fixed bridge name + VXLAN interface attached + static FDB entries to peers' private IPs; detect the NIC name (e.g. `ens5`), don't hardcode `eth0`
 - **Logging:** Docker `fluentd` log driver → Fluent Bit per node → Elasticsearch on `obs-01`
-- **Live logs:** agent publishes to Redis channel `logs:{tenant_id}:{container_id}`
+- **Live logs:** agent publishes to Redis channel `logs:{tenant_id}:{container_id}`. SSE endpoint is `/logs/stream?tenant_id=...&container_id=...` (the exam's shape); `tenant_id` must match the token's tenant, else `403`.
+- **Historical logs:** `GET /containers/{id}/logs` on the control plane queries Elasticsearch filtered by the token's tenant (the exam's "Elasticsearch/Kibana proxy" for the Web UI).
 - **Metrics:** `prometheus_client` on agent + Node Exporter; Grafana data source and dashboards **provisioned from files**
 - **Scheduling:** online agent with the most free memory that fits, from heartbeat data
 - **Web UI:** single `index.html`, vanilla JS
@@ -110,8 +113,8 @@ Do not change these without asking.
 - Tenants: `alpha` (VXLAN 100, `10.10.1.0/24`), `beta` (VXLAN 200, `10.10.2.0/24`)
 - Authentik groups `tenant-alpha`, `tenant-beta`; users `alice` (alpha), `bob` (beta)
 - Bridges `br-alpha`, `br-beta`; VXLAN interfaces `vxlan100`, `vxlan200`
-- Per-node IP ranges in each tenant subnet (`.10–.99` on node-01, `.110–.199` on node-02), each node with its own gateway
-- Git tags: `lab-NN-start` (previous solution + this lab's infra) and `lab-NN-solution`
+- Per-node IP ranges in each tenant subnet, as CIDR blocks because Docker's `--ip-range` only accepts CIDR: node-01 `x.x.x.0/25` with gateway `.1`, node-02 `x.x.x.128/25` with gateway `.129` (e.g. alpha: `10.10.1.0/25` gw `10.10.1.1`, `10.10.1.128/25` gw `10.10.1.129`)
+- Git **branches** (not tags, so fixes found in testing can be committed and merged forward): `lab-NN-start` (previous solution + this lab's infra) and `lab-NN-solution`. Students run `git clone -b lab-NN-start --depth 1 ...`
 
 ## Ports
 
@@ -124,9 +127,9 @@ Control plane 8000, agent 5050, Temporal 7233, Temporal UI 8233, Postgres 5432, 
 Design it in Lab 01; every later lab reuses it. Run from the **workspace**:
 
 1. Fresh credentials from Cloud Tray → `aws configure` → gate on `aws sts get-caller-identity` (and the EC2 probe, since EC2 validates credentials later than STS)
-2. `git clone` the course repo, `git checkout lab-NN-start`
+2. `git clone -b lab-NN-start --depth 1` the course repo
 3. `terraform apply` in `infra/terraform/`
-4. `./scripts/catchup.sh`: installs dependencies on each machine, starts everything the previous lab left running, re-applies state (tenant networks from Postgres; Authentik config with this session's IPs), ends with a verification check
+4. `./scripts/catchup.sh`: pushes the code with `push.sh`, installs dependencies on each machine, starts everything the previous lab left running, re-applies state (tenant networks from Postgres; Authentik config with this session's IPs), ends with a verification check
 
 Must be **scripted and non-interactive**. Target under 10 minutes. Students never redo earlier labs by hand.
 
@@ -238,6 +241,7 @@ What was built, and what the **next lab's title** adds.
 - **SSE:** `EventSource` can't send `Authorization`; use a short-lived stream token in the query string; keep-alives; unsubscribe from Redis on disconnect.
 - **Elasticsearch:** `vm.max_map_count=262144` set persistently; explicit heap sized for a 4 GB machine.
 - **Heartbeats:** offline after ~30s without one.
+- **Fluent Bit in catch-ups:** from the logging lab on, containers use the `fluentd` log driver, and Docker refuses to start a container whose log driver can't connect. Every later catch-up must start Fluent Bit on the nodes even when `obs-01` isn't provisioned (it just retries the ES output).
 
 ---
 
@@ -249,4 +253,4 @@ What was built, and what the **next lab's title** adds.
 
 ## Current state
 
-Planning done. Next: **Lab 00 platform check**, then Lab 01 (reference solution first).
+Planning done. Lab 00 kit is in `docs/labs/lab-00-platform-check/`; waiting for Adid to run it and paste results. Next: Lab 01 (reference solution first).

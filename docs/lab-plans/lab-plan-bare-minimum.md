@@ -84,11 +84,13 @@ All instances are `t3.medium` (2 vCPU / 4 GB), Ubuntu 24.04, region `ap-southeas
 Every lab from 02 onward starts with the same four commands, run on the **workspace**:
 
 1. Fetch fresh credentials from Cloud Tray, `aws configure`, and gate on `aws sts get-caller-identity`
-2. `git clone` the course repo and `git checkout lab-NN-start`
-3. `terraform apply` in `infra/terraform/` (the tag's config creates exactly the machines this lab needs)
-4. `./scripts/catchup.sh` which installs dependencies on each machine, starts every service the previous lab left running, re-applies config (tenant networks, and from Lab 07, Authentik), and ends with a verification check
+2. `git clone -b lab-NN-start --depth 1` the course repo
+3. `terraform apply` in `infra/terraform/` (the branch's config creates exactly the machines this lab needs)
+4. `./scripts/catchup.sh` which pushes the code to the machines (`scripts/push.sh`, the same script students use to deploy their own edits), installs dependencies, starts every service the previous lab left running, re-applies config (tenant networks, and from Lab 07, Authentik), and ends with a verification check. From Lab 05 on it also starts Fluent Bit on the nodes, because containers launched with the `fluentd` log driver won't start without it.
 
-**Git tags:** `lab-NN-start` = previous lab's solution + this lab's infra; `lab-NN-solution` = end of this lab.
+**Git branches:** `lab-NN-start` = previous lab's solution + this lab's infra; `lab-NN-solution` = end of this lab. Branches rather than tags, so fixes found while testing can be committed and merged forward.
+
+**Code delivery:** students write code in the workspace VS Code and run `scripts/push.sh` to rsync it to the machines. No long heredocs in the terminal, and EC2 machines never clone the repo.
 
 ---
 
@@ -132,7 +134,7 @@ Provision the cluster, stand up the control plane, and build the agent that runs
 - Stopping an agent marks it `offline` within ~30 seconds
 - Temporal UI loads in the browser
 
-**Reference solution should include:** `infra/terraform/*.tf`, `infra/control/docker-compose.yml`, `control-plane/main.py`, `agent/agent.py`, `agent/agent.service`, `scripts/catchup.sh`.
+**Reference solution should include:** `infra/terraform/*.tf`, `infra/control/docker-compose.yml`, `control-plane/main.py`, `agent/agent.py`, `agent/agent.service`, `scripts/push.sh`, `scripts/catchup.sh`.
 
 ---
 
@@ -145,7 +147,7 @@ Give each tenant a private network that spans both compute nodes. `alpha` contai
 
 **What you will build:**
 - `tenants` table and `POST /tenants/{tenant_id}/network` (allocates VXLAN ID + subnet)
-- Agent endpoint `setup_tenant_network(...)` that creates, idempotently: a Docker bridge network with a fixed bridge name (`br-alpha`), the node's own IP range and gateway, a VXLAN interface, and FDB entries to each peer node
+- Agent endpoint `setup_tenant_network(...)` that creates, idempotently: a Docker bridge network with a fixed bridge name (`br-alpha`), the node's own IP range and gateway (CIDR halves: node-01 `10.10.1.0/25` gw `.1`, node-02 `10.10.1.128/25` gw `.129`), a VXLAN interface, and FDB entries to each peer node
 - Control plane calls it on every online agent
 
 **Steps:**
@@ -176,7 +178,8 @@ Give each tenant a private network that spans both compute nodes. `alpha` contai
 Launch tenant containers through Temporal workflows and keep managing them: health checks, failure handling, and automatic cleanup when their TTL expires.
 
 **What you will build:**
-- A Temporal worker inside the agent on a node-specific task queue (`node-01`, `node-02`, based on the registered node ID, never the random hostname)
+- A Temporal worker inside the agent on a node-specific task queue (`node-01`, `node-02`, based on the registered node ID, never the random hostname), running activities
+- A workflow worker on `control-01` (task queue `lifecycle`) that runs the workflows and dispatches activities to the chosen node's queue. If a node dies, the workflow still runs and can mark its containers `failed`.
 - Activities: `launch_container`, `check_container`, `stop_container` (Docker SDK); containers labeled `tenant_id`, `node_id`
 - `ContainerLifecycleWorkflow` and `POST /containers` (`tenant_id`, `image`, `cpu`, `mem`, `ttl_seconds`)
 - Simple scheduling from heartbeat data
@@ -296,17 +299,20 @@ Stream container logs to the browser live, and bring the whole platform together
 
 **What you will build:**
 - Agent log publisher: follows each container's Docker logs, publishes to Redis channel `logs:{tenant_id}:{container_id}`
-- `GET /logs/stream?container_id=...` SSE endpoint with token + ownership checks and keep-alives
-- `index.html` served by the control plane itself (same origin, no CORS): Authentik login, container list, metrics, live log panel via `EventSource`
+- `GET /logs/stream?tenant_id=...&container_id=...` SSE endpoint (the exam's shape) with token + ownership checks and keep-alives; `tenant_id` must match the token's tenant
+- `GET /containers/{id}/logs`: historical logs from Elasticsearch, filtered by the token's tenant (the exam's "Elasticsearch/Kibana proxy")
+- `index.html` served by the control plane itself (same origin, no CORS): Authentik login, container list, metrics, historical + live log panel via `EventSource`
+- Login via authorization code flow with the code exchanged **by the control plane** (`/callback`). Browser-side PKCE won't work: `crypto.subtle` is unavailable on a plain-HTTP public-IP origin.
 
 **Steps:**
 1. Add the publisher to the agent (start on launch, stop on removal).
 2. Implement the SSE endpoint; test with `curl -N`.
 3. Handle the browser limitation: `EventSource` cannot send an `Authorization` header, so issue a short-lived stream token as a query parameter.
-4. Build the page: login, list containers, show metrics (control plane proxies Prometheus), live logs.
-5. Final demo: Alice and Bob in separate browsers, each seeing only their own data.
-6. Break it on purpose: Alice requests a `beta` stream → `403`.
-7. Cleanup.
+4. Add the historical-logs endpoint (Elasticsearch query scoped to the tenant).
+5. Build the page: login, list containers, show metrics (control plane proxies Prometheus), historical logs, live logs.
+6. Final demo: Alice and Bob in separate browsers, each seeing only their own data.
+7. Break it on purpose: Alice requests a `beta` stream → `403`.
+8. Cleanup.
 
 **Expected output:**
 - Log lines appear in the browser within about a second
