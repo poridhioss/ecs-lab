@@ -23,14 +23,14 @@ Everything the scripts print is also saved in `~/lab00-output/`. At the end, pas
 
 ## Step 1: Get the kit into the workspace
 
-Either clone the course repo (once it's pushed), or drag the `lab-00-platform-check` folder from your computer into the VS Code Explorer under `~/code`. Then, on the **workspace**:
+Either clone the course repo (once it's pushed), or drag the repo folder from your computer into the VS Code Explorer under `~/code`. Then, on the **workspace**, `cd` into the kit folder (wherever it landed) and save its path. Every later step uses `$KIT`:
 
 ```bash
-cd ~/code/lab-00-platform-check
-ls scripts terraform
+cd ~/code/ecs-lab/docs/labs/lab-00-platform-check
+KIT=$(pwd) && ls $KIT/scripts $KIT/terraform
 ```
 
-The scripts are run with `bash script.sh`, so their executable bit doesn't matter.
+If you open a new terminal, set `KIT` again. The scripts are run with `bash script.sh`, so their executable bit doesn't matter.
 
 ## Step 2: Credentials and workspace facts
 
@@ -39,13 +39,13 @@ Fetch AccessKey/SecretKey from **Cloud Tray → Credentials**. On the **workspac
 ```bash
 aws configure            # region ap-southeast-1, output json
 aws sts get-caller-identity
-aws ec2 describe-regions --region ap-southeast-1 --query 'Regions[0].RegionName' --output text
+aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text
 ```
 
-If the second command says `AuthFailure`, wait a minute and retry (credentials reach STS before EC2).
+The last command should print `ap-southeast-1a`. If it says `AuthFailure`, wait a minute and retry (credentials reach STS before EC2).
 
 ```bash
-bash scripts/workspace-check.sh
+bash $KIT/scripts/workspace-check.sh
 ```
 
 ## Step 3: Key pair and Terraform
@@ -57,10 +57,15 @@ rm -f ~/.ssh/lab00-key.id_rsa
 aws ec2 create-key-pair --key-name lab00-key --output text --query 'KeyMaterial' > ~/.ssh/lab00-key.id_rsa
 chmod 400 ~/.ssh/lab00-key.id_rsa
 ls -l ~/.ssh/lab00-key.id_rsa        # must be ~1.7 KB, not 0
+```
 
-cd ~/code/lab-00-platform-check/terraform
-terraform init
-terraform validate
+The `&&` means Terraform only runs if the `cd` worked:
+
+```bash
+cd $KIT/terraform && terraform init && terraform validate
+```
+
+```bash
 time terraform apply -auto-approve
 ```
 
@@ -74,9 +79,8 @@ Note the `real` time printed at the end. If apply fails, **copy the full error**
 On the **workspace**:
 
 ```bash
-cd ~/code/lab-00-platform-check
-bash scripts/probe.sh
-bash scripts/instance-check.sh
+bash $KIT/scripts/probe.sh
+bash $KIT/scripts/instance-check.sh
 ```
 
 `instance-check.sh` waits for every instance's Docker bootstrap (it prints how long each took), then collects facts from each one over SSH.
@@ -84,7 +88,7 @@ bash scripts/instance-check.sh
 ## Step 5: Browser access (question 3)
 
 ```bash
-terraform -chdir=terraform output test_urls
+terraform -chdir=$KIT/terraform output test_urls
 ```
 
 Open one URL **in your own browser** (not the workspace). Expected page text: `hello from lab00-1`. Note whether it loads.
@@ -96,7 +100,7 @@ In the Poridhi UI, create a Load Balancer pointing at the **public IP** of `lab0
 ## Step 7: Clean up
 
 ```bash
-bash scripts/cleanup.sh
+bash $KIT/scripts/cleanup.sh
 ```
 
 Both leftover lists at the end must be empty.

@@ -1,0 +1,15 @@
+# Terraform working files and state (state lives only in the session's workspace)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Keys and generated local files
+*.id_rsa
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

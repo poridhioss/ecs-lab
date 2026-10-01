@@ -90,7 +90,7 @@ Every lab from 02 onward starts with the same four commands, run on the **worksp
 
 **Git branches:** `lab-NN-start` = previous lab's solution + this lab's infra; `lab-NN-solution` = end of this lab. Branches rather than tags, so fixes found while testing can be committed and merged forward.
 
-**Code delivery:** students write code in the workspace VS Code and run `scripts/push.sh` to rsync it to the machines. No long heredocs in the terminal, and EC2 machines never clone the repo.
+**Code delivery:** students write code in the workspace VS Code and run `scripts/push.sh` to copy it to the machines (tar over ssh; the workspace has no rsync). No long heredocs in the terminal, and EC2 machines never clone the repo.
 
 ---
 
@@ -122,19 +122,19 @@ Provision the cluster, stand up the control plane, and build the agent that runs
 
 **Steps:**
 1. *(workspace)* Fetch credentials, `aws configure`, verify with `aws sts get-caller-identity` and the EC2 probe.
-2. *(workspace)* Create the key pair, check its size, write the Terraform files, `terraform validate`, `terraform apply`.
-3. *(control-01)* Bring up Postgres + Temporal with Docker Compose; open Temporal UI at `http://<control-public-ip>:8233`.
-4. *(control-01)* Build the control plane: `POST /agents/register`, `POST /agents/{node_id}/heartbeat`, `GET /agents`, plus a background task marking agents `offline` after 30 seconds of silence. Agent endpoints use a shared agent token.
-5. *(node-01, node-02)* Install the agent (`psutil` for CPU/memory) as a systemd service.
+2. *(workspace)* `terraform apply` in `infra/terraform/` (Terraform also creates the SSH key and a per-session agent token; machines get fixed private IPs).
+3. *(workspace → control-01)* `scripts/push.sh infra`: Postgres + Temporal dev server via Docker Compose; open Temporal UI at `http://<control-public-ip>:8233`.
+4. *(workspace → control-01)* Build the control plane: `POST /agents/register`, `POST /agents/{node_id}/heartbeat`, `GET /agents`, plus a background task marking agents `offline` after 30 seconds of silence. Agent endpoints check the `X-Agent-Token` header. Deploy with `scripts/push.sh control-plane`.
+5. *(workspace → nodes)* Build the agent (`psutil` for CPU/memory, NIC detected from the default route) and deploy it as a systemd service with `scripts/push.sh agent`.
 6. Break it on purpose: stop the agent on `node-02` and watch its status flip to `offline`, then start it again.
-7. *(workspace)* Cleanup: `terraform destroy -auto-approve`, delete key pair, verify nothing is running.
+7. *(workspace)* Cleanup: `scripts/destroy.sh` (destroy + leftover check).
 
 **Expected output:**
 - `GET /agents` shows both nodes `online` with capacity
 - Stopping an agent marks it `offline` within ~30 seconds
 - Temporal UI loads in the browser
 
-**Reference solution should include:** `infra/terraform/*.tf`, `infra/control/docker-compose.yml`, `control-plane/main.py`, `agent/agent.py`, `agent/agent.service`, `scripts/push.sh`, `scripts/catchup.sh`.
+**Reference solution should include:** `infra/terraform/*.tf`, `infra/control/docker-compose.yml` + `install.sh`, `control-plane/main.py` + `install.sh` + unit, `agent/agent.py` + `install.sh` + unit, `scripts/push.sh`, `scripts/verify.sh`, `scripts/catchup.sh`, `scripts/destroy.sh`.
 
 ---
 

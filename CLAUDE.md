@@ -48,8 +48,8 @@ Each tenant:
 
 | # | Folder | Student-facing title | Status |
 |---|---|---|---|
-| 00 | `lab-00-platform-check` | Platform check (author only, not published) | kit drafted, not run |
-| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | not started |
+| 00 | `lab-00-platform-check` | Platform check (author only, not published) | done |
+| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | solution built, not tested on Poridhi |
 | 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
 | 04 | `lab-04-logging` | Centralized Logging with Fluent Bit and Elasticsearch | not started |
@@ -68,9 +68,10 @@ Note the order: logging and metrics come **before** SSO on purpose, so only the 
 - Students work in a **browser VS Code workspace** (a Poridhi VM, user `poridhian`, starts in `~/code`) with AWS CLI + Terraform preinstalled, and a **temporary AWS account**.
 - **Every lab launch is a brand-new workspace and new IAM credentials.** Nothing survives: no EC2 access, no SSH key, no Terraform state, no repo clone, no running services.
 - Region `ap-southeast-1`, AZ `ap-southeast-1a`. No default VPC. EC2 login user `ubuntu`.
-- **Confirmed allowed instance types: `t2.micro`, `t3.medium` only.** Everything else is untested or denied.
+- **Allowed instance types: `t2.micro`, `t2.small`, `t3.medium` only** (read from the IAM policy in Lab 00; everything larger is denied). 5 `t3.medium`s run at once fine.
+- EC2 NIC is `ens5`, MTU 9001; `vxlan` module loads; Python 3.12.3. Route 53 is not permitted.
 - Only the workspace holds the SSH key; EC2 instances **cannot SSH to each other**.
-- Every lab must end with `terraform destroy` + key-pair deletion + a leftover check.
+- Every lab must end with `terraform destroy` (which also deletes the Terraform-made key pair) + a leftover check (`scripts/destroy.sh` does both).
 
 ---
 
@@ -89,11 +90,17 @@ Do not change these without asking.
   | `obs-01` | Elasticsearch, Kibana | 04 |
   | `auth-01` | Authentik | 06 |
 
-  If Lab 00 shows `t3.xlarge` is allowed, ask Adid before collapsing machines.
-- **Network:** VPC `10.0.0.0/16`, public subnet `10.0.1.0/24`, security group with SSH from anywhere + **one `self = true` rule for all internal traffic** + browser-facing UI ports from anywhere
-- **Browser access to UIs:** EC2 public IP + opened port (⚠️ to verify in Lab 00). No SSH tunnels in student steps.
+  Lab 00 confirmed nothing larger than `t3.medium` is allowed, so this split layout is final.
+- **Network:** VPC `10.0.0.0/16`, public subnet `10.0.1.0/24`, security group with SSH from anywhere + **one `self = true` rule for all internal traffic** + browser-facing UI ports from anywhere (`public_ports` variable)
+- **Fixed private IPs** (Terraform `machines` map): `control-01` 10.0.1.10, `node-01` 10.0.1.21, `node-02` 10.0.1.22, `obs-01` 10.0.1.30, `auth-01` 10.0.1.40. Every config can name its peers up front, with no dependency cycles (e.g. Prometheus on control-01 needs node IPs while nodes need control-01's IP). Only public IPs change per session.
+- **Per-machine settings:** `user_data` writes `/etc/ecs-lab/ecs-lab.env` (`NODE_ID`, `CONTROL_IP`, `AGENT_TOKEN`); systemd units read it with `EnvironmentFile=`. The agent token is a Terraform `random_password`, new every session. Agents send it as the `X-Agent-Token` header (keeps `Authorization` free for user JWTs).
+- **SSH key made by Terraform** (`tls_private_key` + `aws_key_pair`, written to `~/.ssh/ecs-lab-key.id_rsa`), so `terraform destroy` removes it: no manual key-pair step, no zero-byte key file.
+- **Temporal:** the `temporalio/temporal` image running `server start-dev` (server + UI in one process, SQLite file on a volume, UI on 8233). Lighter than the multi-container auto-setup stack on a 4 GB machine.
+- **Deploy layout:** code under `/opt/ecs-lab/` on each machine, one venv at `/opt/ecs-lab/venv`; each component has an idempotent `install.sh`. `scripts/push.sh infra|control-plane|agent|all` copies and runs it.
+- **Browser access to UIs:** EC2 public IP + opened port (✅ verified in Lab 00). No SSH tunnels, no Poridhi Load Balancer (it rejects public IPs).
+- **Docker version pinned:** `curl -fsSL https://get.docker.com | sh -s -- --version 29.8` in `user_data`, so a future Docker release can't change networking/firewall behaviour under the labs.
 - **Control plane:** FastAPI + Postgres. Also serves `web-ui/index.html` (same origin, no CORS).
-- **Code delivery:** students edit code in the workspace VS Code; `scripts/push.sh` rsyncs it to the EC2 machines and restarts services. Catch-up uses the same script. EC2 machines never clone the repo.
+- **Code delivery:** students edit code in the workspace VS Code; `scripts/push.sh` copies it to the EC2 machines (`tar czf - ... | ssh HOST tar xzf -`; the workspace has no `rsync`) and restarts services. Catch-up uses the same script. EC2 machines never clone the repo.
 - **Orchestration:** Temporal Python SDK; task queue per node named after the **registered node ID** (`node-01`), never the hostname. Activities run on the node queues; **workflows run on a worker on `control-01`** (task queue `lifecycle`), so a dead node can still be marked `failed`.
 - **Agent → control plane:** HTTP with a shared agent token
 - **Users → control plane:** Authentik JWT (RS256, JWKS); `tenant_id` from the `groups` claim, **never** from the request body
@@ -127,7 +134,7 @@ Control plane 8000, agent 5050, Temporal 7233, Temporal UI 8233, Postgres 5432, 
 Design it in Lab 01; every later lab reuses it. Run from the **workspace**:
 
 1. Fresh credentials from Cloud Tray → `aws configure` → gate on `aws sts get-caller-identity` (and the EC2 probe, since EC2 validates credentials later than STS)
-2. `git clone -b lab-NN-start --depth 1` the course repo
+2. `git clone -b lab-NN-start --depth 1` the course repo, then **leftover check**: `bash scripts/preflight.sh` (deletes any `ecs-lab-vpc` / `ecs-lab-key` an earlier session left; usually prints `clean`). Show the check command inline in the doc so students see what it looks for.
 3. `terraform apply` in `infra/terraform/`
 4. `./scripts/catchup.sh`: pushes the code with `push.sh`, installs dependencies on each machine, starts everything the previous lab left running, re-applies state (tenant networks from Postgres; Authentik config with this session's IPs), ends with a verification check
 
@@ -175,8 +182,13 @@ never by number), and to the final exam. One intuitive analogy.
 ## Architecture
 Mermaid diagram (placeholder; the team redraws it as a PNG).
 
+## Before you start               ← every lab, including the first
+Fresh credentials + STS/EC2 gate, clone, then the leftover check: show
+`aws ec2 describe-vpcs --filters "Name=tag:Name,Values=ecs-lab-vpc" --query 'Vpcs[].VpcId' --output text`
+inline (empty = clean), and run `bash scripts/preflight.sh` to delete anything found.
+
 ## Catch-up                      ← every lab except the first
-The four catch-up commands and the verification that proves they worked.
+terraform apply + catchup.sh, and the verification that proves they worked.
 
 ## Concepts
 New concepts, problem first.
@@ -249,8 +261,12 @@ What was built, and what the **next lab's title** adds.
 
 *(Append here whenever a real Poridhi run breaks something: what failed, why, and the fix.)*
 
+- **A failed `cd` doesn't stop a pasted block** (Lab 00). The rest of the paste ran in the wrong directory; `terraform init` "succeeded" in an empty folder and `apply` said "No configuration files". Fix: never assume the repo path; set a variable once (`KIT=$(pwd)`) and chain `cd DIR && cmd`, or put `cd` in its own block.
+- **`describe-regions --query 'Regions[0].RegionName'` prints `ap-south-1`**, not the configured region: it's just the first region in the list. It looks like a misconfiguration to students. Use `aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text` (prints `ap-southeast-1a`) as the EC2 credential probe.
+- **The workspace has no `rsync`** (Lab 00). `push.sh` uses `tar | ssh tar` instead.
+
 ---
 
 ## Current state
 
-Planning done. Lab 00 kit is in `docs/labs/lab-00-platform-check/`; waiting for Adid to run it and paste results. Next: Lab 01 (reference solution first).
+Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 reference solution built (`infra/terraform`, `infra/control`, `control-plane/`, `agent/`, `scripts/`); Terraform validated and control-plane routing/auth tested locally, but not yet run on Poridhi. Next: Adid runs it end to end, then write the Lab 01 document from the real output.

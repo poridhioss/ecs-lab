@@ -8,7 +8,7 @@ exec > >(tee ~/lab00-output/probe.txt) 2>&1
 
 echo "== 1. credentials =="
 aws sts get-caller-identity --output table
-aws ec2 describe-regions --region ap-southeast-1 --query 'Regions[0].RegionName' --output text
+aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text
 
 echo; echo "== 2. IAM policy =="
 USER_NAME=$(aws sts get-caller-identity --query Arn --output text | awk -F/ '{print $NF}')

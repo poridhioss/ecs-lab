@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Lab 00: facts about one EC2 instance. Not run directly: instance-check.sh pipes it over ssh.
 # Arguments: the private IPs of all lab instances (to test instance-to-instance traffic).
-show() { printf '%-16s ' "$1"; shift; "$@" 2>&1 | head -1 || true; }
+# The trailing `; echo` ends lines for commands that print no newline (curl -w).
+show() { printf '%-16s ' "$1"; shift; { "$@" 2>&1; echo; } | head -1 || true; }
 
 echo "==== $(hostname) ===="
 grep --color=never -E 'BOOTSTRAP (START|DONE)|DOCKER INSTALLED|VXLAN MODULE' /var/log/bootstrap.log

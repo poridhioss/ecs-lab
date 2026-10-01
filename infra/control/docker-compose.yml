@@ -1,0 +1,38 @@
+# Stateful services on control-01. The control plane itself runs on the host (systemd).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ecs
+      POSTGRES_PASSWORD: ecs
+      POSTGRES_DB: ecs
+    ports:
+      - "127.0.0.1:5432:5432"   # only the control plane on this machine needs it
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ecs"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Temporal's single-binary dev server: server + Web UI in one process,
+  # small enough for a 4 GB machine. State is kept in a SQLite file.
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command: >
+      server start-dev
+      --ip 0.0.0.0
+      --ui-ip 0.0.0.0
+      --db-filename /data/temporal.db
+    user: root                  # so it can write to the named volume
+    ports:
+      - "7233:7233"             # gRPC: agents' workers connect here (from the lifecycle lab)
+      - "8233:8233"             # Web UI
+    volumes:
+      - temporaldata:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  temporaldata:

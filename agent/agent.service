@@ -1,0 +1,14 @@
+[Unit]
+Description=ECS lab agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+# Runs as root: later labs have it create network interfaces and containers.
+EnvironmentFile=/etc/ecs-lab/ecs-lab.env
+ExecStart=/opt/ecs-lab/venv/bin/python /opt/ecs-lab/agent/agent.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

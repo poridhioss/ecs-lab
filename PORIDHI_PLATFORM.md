@@ -121,9 +121,24 @@ A Poridhi VM has **two** addresses, and confusing them breaks labs:
 
 ✅ Students can't open `localhost:3000` in their own browser, because the service runs on a Poridhi VM. The **Poridhi Load Balancer** fixes this. Students create one in the Poridhi UI, pointing at an **IP and port**, and get a browser URL back. The CKA labs used it for Prometheus (NodePort 30090), Grafana (30300), Alertmanager and ArgoCD.
 
-⚠️ **Unknown whether it can point at an EC2 public IP.** It was only ever used for services on the Poridhi cluster's own nodes. This matters a lot for the Agent Cloud course — see Section 8.3.
+✅ **It cannot point at an EC2 public IP.** On an AWS lab (Lab 00, 2026-09-30), entering `52.221.225.232` with port `8000` in the Load Balancer form was rejected by the form's own validation: *"Please match the requested format. Please enter a valid IP address."* It only accepts some internal address format. Not needed anyway: see Section 8.3.
 
-### 4.6 VM sizes (k3s lab types)
+### 4.6 The AWS workspace's tools
+
+✅ Checked on a real AWS lab workspace (Lab 00, 2026-09-30):
+
+| | |
+|---|---|
+| OS / kernel | Ubuntu 24.04.4 LTS, kernel `5.10.51` |
+| Size | 2 vCPU, ~3.9 GB RAM |
+| Python | 3.12.3, with `pip3` 24.0 |
+| Docker | 29.7.2, daemon running |
+| Terraform | **1.5.2** (old: don't use syntax newer than 1.5) |
+| AWS CLI | 2.36.32 |
+| Also present | git 2.43, jq 1.7, curl 8.5, OpenSSH 9.6 |
+| **Missing** | **`rsync`** |
+
+### 4.7 VM sizes (k3s lab types)
 
 ✅ Standard k3s lab: roughly **2 vCPU / 2 GB** per node. ✅ A **larger lab type** exists with a **4 vCPU / 4 GB control plane** (workers unchanged). Heavy stacks such as Prometheus + Grafana crashed the 2 GB control plane and needed the larger type.
 
@@ -141,10 +156,11 @@ These all come from running the kubeadm labs (the **Building a Kubernetes Cluste
   InvalidClientTokenId: The security token included in the request is invalid.
   ```
   Terraform reports this as a provider error on `GetCallerIdentity`, which *looks* like a config bug but isn't. **Every AWS lab must tell students to fetch fresh credentials, and gate progress on `aws sts get-caller-identity` succeeding.**
-- ✅ **New credentials reach STS before EC2.** `get-caller-identity` can succeed while the next EC2 call fails with `AuthFailure: AWS was not able to validate the provided access credentials`. Wait about a minute and retry. A read-only probe:
+- ✅ **New credentials reach STS before EC2.** `get-caller-identity` can succeed while the next EC2 call fails with `AuthFailure: AWS was not able to validate the provided access credentials`. Wait about a minute and retry. A read-only probe that prints `ap-southeast-1a`:
   ```bash
-  aws ec2 describe-regions --region ap-southeast-1 --query 'Regions[0].RegionName' --output text
+  aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text
   ```
+  ✅ Don't use `describe-regions --query 'Regions[0].RegionName'`: it prints the first region in AWS's list (`ap-south-1`), which students read as a wrong-region error.
 - ✅ Learn to tell the two apart: **`AuthFailure`** means the credentials aren't validated yet (wait or regenerate). **`UnauthorizedOperation`** means the credentials are valid but a policy forbids the action.
 - ✅ Leftover `AWS_*` environment variables override `~/.aws/credentials`. `aws configure list` shows where each value really comes from. A stale `AWS_SESSION_TOKEN` alongside fresh keys causes `InvalidClientTokenId`.
 - ✅ Real credentials were pasted into chat during testing. They're short-lived, but **never write real keys into a lab document or commit them**.
@@ -156,16 +172,25 @@ These all come from running the kubeadm labs (the **Building a Kubernetes Cluste
 UnauthorizedOperation: … not authorized to perform: ec2:RunInstances … with an explicit deny in an identity-based policy
 ```
 
-✅ **Probed on a real account:**
+✅ **The full policy was read in Lab 00 (2026-09-30)** with `aws iam get-user-policy --user-name USER --policy-name RestrictedAccessPolicy`. Its instance-type rule is an explicit **Deny on `ec2:*` for any instance type other than `t2.micro`, `t2.small`, `t3.medium`**. Dry-run probes agree:
 
 | Type | vCPU / RAM | Result |
 |---|---|---|
 | `t2.micro` | 1 / 1 GB | ALLOWED |
+| `t2.small` | 1 / 2 GB | ALLOWED (per policy, not dry-run) |
 | `t3.micro` | 2 / 1 GB | DENIED |
 | `t3.small` | 2 / 2 GB | DENIED |
 | **`t3.medium`** | **2 / 4 GB** | **ALLOWED** |
 | `t2.medium` | 2 / 4 GB | DENIED |
-| `t3.large`, `t3.xlarge`, anything else | — | ⚠️ **never tested** |
+| `t3.large`, `t3.xlarge`, `t3.2xlarge`, `m5.large`, `m5.xlarge`, `c5.xlarge` | — | DENIED |
+
+✅ Other things the policy says:
+
+- **All regional services are allowed only in `ap-southeast-1`** (condition `aws:RequestedRegion`): EC2, ELB, Auto Scaling, Lambda, S3, ECR, SQS, SNS, SES, Step Functions, API Gateway, VPC Lattice, and DynamoDB tables in that region.
+- **Route 53 is not allowed at all** (not in the policy). Service Quotas (`servicequotas:GetServiceQuota`) and `iam:ListGroupsForUser` are denied too.
+- ✅ **Elastic IPs: allowed** (`allocate-address --dry-run`), limit 5. They do **not** give stable URLs across sessions: every session destroys and recreates everything, so a new session gets a new address anyway.
+- ✅ **Instance count:** `max-instances` attribute is 20, and **5 `t3.medium`s ran at the same time** without error.
+- ✅ **EBS:** a 20 GB gp3 root volume is allowed.
 
 ✅ Other points:
 
@@ -182,7 +207,24 @@ UnauthorizedOperation: … not authorized to perform: ec2:RunInstances … with 
   esac
   ```
 
-⚠️ Other quotas the policy may impose — instance count, EBS size, services such as Route 53 or ECR — are **unknown**.
+### 5.2a EC2 instance facts (Lab 00, 2026-09-30)
+
+✅ Stock Ubuntu 24.04 AMI (`ubuntu-noble-24.04-amd64-server-*`) on `t3.medium`:
+
+| | |
+|---|---|
+| Kernel | `7.0.0-1013-aws` |
+| Usable RAM | ~3.8 GB (3832 MB) |
+| NIC | **`ens5`**, MTU **9001** (jumbo frames) |
+| `vxlan` module | loads with `modprobe vxlan` |
+| Python | 3.12.3 |
+| rsync | present (3.2.7) |
+| Docker | installed by `curl -fsSL https://get.docker.com \| sh` in `user_data` (got 29.8.1, the latest at the time) |
+| Outbound | GitHub and Docker Hub pulls work |
+| Instance ↔ instance | works on any port through the `self = true` rule |
+| Workspace → EC2 public IP | works on an opened port |
+
+✅ **Timing:** `terraform apply` for VPC + 5 instances took **49 s**. `user_data` Docker install finished **~43 s** after boot; all 5 were ready by the time the apply ended and SSH checks began.
 
 ### 5.3 Provisioning with Terraform
 
@@ -232,7 +274,8 @@ UnauthorizedOperation: … not authorized to perform: ec2:RunInstances … with 
     --query 'Reservations[].Instances[].Tags[?Key==`Name`].Value' --output text
   ```
   This should print nothing.
-- ⚠️ **Terraform state lives in the workspace, which is destroyed at session end.** If a student closes the lab without destroying, a new session cannot `terraform destroy` those resources, and the orphans must be removed by hand from the console. Whether Poridhi cleans up the AWS account between sessions is **unknown**. Labs should include a check for leftovers from a previous attempt (e.g. look up the lab's VPC by its `Name` tag).
+- ✅ **Terraform state lives in the workspace, which is destroyed at session end.** If a student closes the lab without destroying, a new session cannot `terraform destroy` those resources.
+- ✅ **Poridhi cleaned the AWS account between sessions** in Lab 00: a tagged "canary" VPC deliberately left behind was gone in the next session. Don't rely on it always happening. **Every lab still starts with a leftover check** (`scripts/preflight.sh`: finds `ecs-lab-vpc` / `ecs-lab-key` by name and deletes them). A leftover key pair would otherwise make `terraform apply` fail with a duplicate key name.
 
 ---
 
@@ -276,7 +319,7 @@ Expect several rounds per lab. In the CKA series, most first drafts had at least
   https://raw.githubusercontent.com/poridhiEng/lab-asset/refs/heads/main/<Course%20Folder>/<Lab-XX>/images/<file>
   ```
   Spaces are URL-encoded (`CKA%20Labs`). Before publishing, **every image link must be a hosted URL** — no local `./images/…` paths left — and each should be checked for a `200` response. ✅ Hero diagrams are large (~1.4 MB each); compressing them would speed up page loads.
-- ⚠️ **Collapsible `<details>` blocks** were used for hidden exam solutions. Adid believes Poridhi's renderer supports them, but this is unconfirmed.
+- ✅ **Collapsible `<details>` blocks render correctly** in the Poridhi lab viewer (checked in Lab 00), including a fenced code block inside. Use them for hints and hidden solutions.
 
 ### 7.3 Content conventions that worked
 
@@ -304,7 +347,7 @@ An earlier plan put everything on one `t3.xlarge` (16 GB). The only instance typ
 | `auth-01` | Authentik |
 | `node-01`, `node-02` | Agent, Docker, Fluent Bit, Node Exporter |
 
-The capstone needs all five. ⚠️ Whether larger types are allowed, and whether the account caps the number of instances, is checked by the Lab 00 platform check (`docs/labs/lab-00-platform-check/`).
+The capstone needs all five. ✅ Lab 00 confirmed that nothing larger than `t3.medium` is allowed, and that 5 `t3.medium`s run at once (§5.2).
 
 ### 8.2 🔴 Labs build on each other; environments don't persist
 
@@ -312,22 +355,23 @@ See Section 3. Every lab from 02 onward needs a **scripted catch-up**: Terraform
 
 ### 8.3 🔴 Reaching web UIs, and Authentik redirect URIs
 
-Students need browser access to Temporal UI (8233), Authentik (9000), Kibana (5601), Grafana (3000) and the tenant web UI. Options, none yet tested for EC2:
+Students need browser access to Temporal UI (8233), Authentik (9000), Kibana (5601), Grafana (3000) and the tenant web UI.
 
-- **Open the port in the security group and use the EC2 public IP.** Simplest, and exposes the service to the internet — acceptable for a short-lived lab.
-- **Poridhi Load Balancer** pointed at the EC2 public IP — ⚠️ unknown whether it supports external targets.
-- **`ssh -L` tunnel from the workspace** — the plan suggests this for Temporal UI, but the tunnel ends on the *workspace's* localhost, and ⚠️ whether the student's own browser can reach that is unknown. It may work through code-server's port forwarding.
+✅ **Decided: open the port in the security group and use the EC2 public IP.** Verified in Lab 00: a student's own browser loaded `http://<ec2-public-ip>:8000/` directly (Chrome shows "Not secure", since it's plain HTTP). It exposes the service to the internet, which is acceptable for a short-lived lab.
 
-**Authentik makes this harder.** The OAuth redirect URI and issuer URL must exactly match the URL the browser uses, and **EC2 public IPs change on every provision** — so they change every lab. The redirect URI configuration must be **templated and re-applied by the catch-up script**. An Elastic IP is an alternative, if the policy allows it (⚠️ unknown). Test a real browser login through whichever access method is chosen **before** writing the SSO lab (Lab 06).
+Ruled out: the **Poridhi Load Balancer** rejects public IPs (§4.5). **`ssh -L` tunnels** end on the workspace's localhost and aren't needed.
+
+**Authentik makes this harder.** The OAuth redirect URI and issuer URL must exactly match the URL the browser uses, and **EC2 public IPs change on every provision** — so they change every lab. The redirect URI configuration must be **templated and re-applied by the catch-up script**. ✅ Elastic IPs are allowed but don't help: each session destroys and re-allocates them, so the address still changes between sessions. Test a real browser login through whichever access method is chosen **before** writing the SSO lab (Lab 06).
 
 A second browser trap: **`crypto.subtle` (needed for PKCE S256) only exists in secure contexts**, meaning HTTPS or `localhost`. A page served from `http://<public-ip>:8000` doesn't have it, so the Web UI must let the control plane exchange the authorization code rather than doing PKCE in browser JavaScript.
 
 ### 8.4 Things that should just work on EC2
 
 - ✅ **VXLAN** — EC2 runs a standard Ubuntu kernel, and the `self = true` security-group rule already allows UDP 4789 between instances. Don't try the VXLAN labs on a Poridhi VM, whose custom kernel may lack the modules.
-- ⚠️ **Docker is not on the stock Ubuntu AMI.** Install it in `user_data` or a bootstrap script. (Docker *is* on Poridhi VMs, but the containers here run on EC2.)
+- ✅ **Docker is not on the stock Ubuntu AMI**, and `curl -fsSL https://get.docker.com | sh` in `user_data` installs it in ~40 s.
+- ✅ **The `vxlan` kernel module loads** on the EC2 kernel, and the NIC is `ens5`.
 - ⚠️ **Elasticsearch needs `sudo sysctl -w vm.max_map_count=262144`** on its host, set persistently, and an explicit heap size to fit the instance's memory.
-- ⚠️ **MTU:** inside a VPC, t3 instances use jumbo frames (9001), so VXLAN's ~50 bytes of overhead is unlikely to bite. Still verify with a large-packet ping across nodes.
+- ✅ **MTU is 9001** (jumbo frames), so VXLAN's ~50 bytes of overhead shouldn't bite. The VXLAN lab still verifies it with a large-packet ping.
 
 ### 8.5 Two "machines" students will confuse
 
@@ -339,17 +383,17 @@ The **workspace** (a Poridhi VM, holding the credentials, key and Terraform stat
 
 | # | Question | Why it matters |
 |---|---|---|
-| 1 | Are `t3.large` / `t3.xlarge` allowed? What's the full `RestrictedAccessPolicy`? | Decides the whole machine layout (8.1) |
-| 2 | Is there a cap on the number of running instances? | A split layout needs about 5 |
-| 3 | Can a student's browser reach a service on an EC2 instance? Via which method? | Every UI in the course depends on it (8.3) |
-| 4 | Can the Poridhi Load Balancer target an EC2 public IP? | Might be the cleanest answer to #3 |
-| 5 | Do AWS resources survive into a new session, and does Poridhi clean the account? | Orphans, cost, leftover-check design (5.5) |
-| 6 | Are Elastic IPs allowed? | Stable redirect URIs for Authentik (8.3) |
-| 7 | Does Poridhi's lab renderer support `<details>`? | Hidden solutions and hints |
-| 8 | What Python version is in the workspace, and is Docker there? | Whether anything can run locally before EC2 |
-| 9 | Is `rsync` in the workspace and on the EC2 AMI? | `scripts/push.sh` depends on it |
-| 10 | How long does `terraform apply` + Docker bootstrap take? | Catch-up time budget (target < 10 min) |
-| 11 | EC2 facts: NIC name, MTU, `vxlan` module, Python version, Docker Hub pulls | VXLAN lab, agent runtime |
-| 12 | Are EBS volumes above 8 GB allowed? | Docker images for Elasticsearch, Temporal, Authentik need room |
+| 1 | ✅ No. Only `t2.micro`, `t2.small`, `t3.medium` (§5.2) | Decides the whole machine layout (8.1) |
+| 2 | ✅ 5 `t3.medium`s run at once; `max-instances` = 20 | A split layout needs about 5 |
+| 3 | ✅ Yes: EC2 public IP + port opened in the security group | Every UI in the course depends on it (8.3) |
+| 4 | ✅ No: its form rejects public IPs | Might be the cleanest answer to #3 |
+| 5 | ✅ Account was cleaned between sessions; labs still run a leftover check (5.5) | Orphans, cost, leftover-check design (5.5) |
+| 6 | ✅ Allowed, but don't survive sessions, so no help | Stable redirect URIs for Authentik (8.3) |
+| 7 | ✅ Yes, `<details>` renders | Hidden solutions and hints |
+| 8 | ✅ Workspace has Python 3.12.3 and a running Docker 29.7.2 (§4.6) | Whether anything can run locally before EC2 |
+| 9 | ✅ Workspace has **no `rsync`**, so `push.sh` uses tar over ssh | `scripts/push.sh` depends on it |
+| 10 | ✅ ~49 s apply + ~43 s Docker bootstrap (§5.2a) | Catch-up time budget (target < 10 min) |
+| 11 | ✅ `ens5`, MTU 9001, `vxlan` loads, Python 3.12.3, Docker Hub OK (§5.2a) | VXLAN lab, agent runtime |
+| 12 | ✅ 20 GB gp3 root volume allowed | Docker images for Elasticsearch, Temporal, Authentik need room |
 
 Record each answer back into this file, moving it from ⚠️ to ✅, so the next person inherits facts instead of guesses.
