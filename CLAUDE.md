@@ -49,7 +49,7 @@ Each tenant:
 | # | Folder | Student-facing title | Status |
 |---|---|---|---|
 | 00 | `lab-00-platform-check` | Platform check (author only, not published) | done |
-| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | solution built, not tested on Poridhi |
+| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | solution built, doc drafted (outputs UNTESTED), not tested on Poridhi |
 | 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
 | 04 | `lab-04-logging` | Centralized Logging with Fluent Bit and Elasticsearch | not started |
@@ -121,7 +121,11 @@ Do not change these without asking.
 - Authentik groups `tenant-alpha`, `tenant-beta`; users `alice` (alpha), `bob` (beta)
 - Bridges `br-alpha`, `br-beta`; VXLAN interfaces `vxlan100`, `vxlan200`
 - Per-node IP ranges in each tenant subnet, as CIDR blocks because Docker's `--ip-range` only accepts CIDR: node-01 `x.x.x.0/25` with gateway `.1`, node-02 `x.x.x.128/25` with gateway `.129` (e.g. alpha: `10.10.1.0/25` gw `10.10.1.1`, `10.10.1.128/25` gw `10.10.1.129`)
-- Git **branches** (not tags, so fixes found in testing can be committed and merged forward): `lab-NN-start` (previous solution + this lab's infra) and `lab-NN-solution`. Students run `git clone -b lab-NN-start --depth 1 ...`
+- **Repo:** https://github.com/poridhioss/ecs-lab.git (public). Git **branches**, not tags:
+  - `main`: authoring branch. Everything, including author-only files and the newest code. Students never use it.
+  - `lab-NN-start`: what students clone (`git clone -b lab-NN-start --depth 1 https://github.com/poridhioss/ecs-lab.git`). Lab 01: infra + scripts + install/unit files, **without** the files students write (`control-plane/main.py`, `agent/agent.py`). Later labs: previous lab's full solution + this lab's new infra.
+  - `lab-NN-solution`: finished reference for lab NN.
+  - Branches are cut from `main` only after a lab passes on Poridhi. A later fix is committed on `main`, then cherry-picked into each affected lab branch.
 
 ## Ports
 
@@ -269,4 +273,4 @@ What was built, and what the **next lab's title** adds.
 
 ## Current state
 
-Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 reference solution built (`infra/terraform`, `infra/control`, `control-plane/`, `agent/`, `scripts/`); Terraform validated and control-plane routing/auth tested locally, but not yet run on Poridhi. Next: Adid runs it end to end, then write the Lab 01 document from the real output.
+Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 reference solution built (`infra/terraform`, `infra/control`, `control-plane/`, `agent/`, `scripts/`); Terraform validated and control-plane routing/auth tested locally, but not yet run on Poridhi. Lab 01 document drafted at `docs/labs/lab-01-control-plane/README.md`; its code blocks are checked to match `main.py`/`agent.py` byte for byte, and every sample output is marked `<!-- UNTESTED -->`. Next: Adid runs the doc on Poridhi from branch `lab-01-start` (= `main` minus `control-plane/main.py`, `agent/agent.py` and author-only files), then real output replaces the UNTESTED blocks.
