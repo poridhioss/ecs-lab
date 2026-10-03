@@ -172,6 +172,17 @@ variable "machines" {
 }
 ```
 
+`instances.tf` creates one machine per entry and asks AWS for that exact address:
+
+```hcl
+resource "aws_instance" "machine" {
+  for_each   = var.machines   # one machine per entry in the map
+  ...
+  private_ip = each.value     # this exact address, not "any free one"
+```
+
+Without `private_ip`, AWS would pick any free address in the subnet. With it, AWS assigns exactly that address, or `terraform apply` fails with an error instead of quietly choosing another. These addresses are always free because every session starts with a brand-new, empty VPC. They are also all inside the subnet `10.0.1.0/24` and avoid the five addresses AWS reserves in every subnet (`.0` to `.3` and `.255`).
+
 Because the addresses are fixed, every machine knows where the control plane is (`10.0.1.10`) before any of them exist. Only the *public* IPs change each time you create the cluster.
 
 Create it:
@@ -240,7 +251,20 @@ CONTROL_IP=10.0.1.10
 AGENT_TOKEN=Xk3...
 ```
 
-The agent will read these three values: its own name, where the control plane is, and the secret token.
+The agent will read these three values: its own name, where the control plane is, and the secret token. Terraform filled in `CONTROL_IP` from the same `machines` map, so it always matches the address `control-01` really has. Check it:
+
+**workspace**
+```bash
+ssh control-01 'hostname; hostname -I'
+```
+
+`hostname -I` lists the machine's IP addresses. The first one is its private IP on the VPC (Docker's own internal address may follow it).
+
+<!-- UNTESTED -->
+```
+control-01
+10.0.1.10 172.17.0.1
+```
 
 ### Step 2: Start Postgres and Temporal
 
@@ -258,10 +282,21 @@ bash scripts/push.sh infra
 
 `push.sh infra` packs `infra/control/`, copies it over SSH to `/opt/ecs-lab/` on `control-01`, and runs its `install.sh` there. That runs `docker compose up -d --wait`: `-d` starts the containers in the background, and `--wait` blocks until they are running and Postgres reports healthy.
 
-<!-- UNTESTED -->
+The first time, Docker downloads the two images and prints many `Extracting` and `Pull complete` lines. That's normal. The end of the output looks like this:
+
 ```
-==> copied infra/control to control-01
-...
+ Image temporalio/temporal:1.9.1 Pulled
+ ...
+ Image postgres:16 Pulled
+ Network control_default Created
+ Volume control_pgdata Created
+ Volume control_temporaldata Created
+ Container control-postgres-1 Created
+ Container control-temporal-1 Created
+ Container control-temporal-1 Started
+ Container control-postgres-1 Started
+ Container control-temporal-1 Healthy
+ Container control-postgres-1 Healthy
 waiting for the Temporal UI on :8233 ...
 Postgres and Temporal are up
 ```
@@ -468,7 +503,6 @@ bash scripts/push.sh control-plane
 
 This copies `control-plane/` to `control-01`, creates a Python virtual environment at `/opt/ecs-lab/venv`, installs `requirements.txt` (FastAPI, Uvicorn, psycopg), installs `control-plane.service` as a systemd service, and waits until `/health` answers.
 
-<!-- UNTESTED -->
 ```
 ==> copied control-plane to control-01
 waiting for the control plane on :8000 ...
@@ -484,7 +518,6 @@ curl -s http://$CONTROL:8000/agents; echo
 
 `-s` hides curl's progress bar. `; echo` adds the newline the JSON doesn't end with.
 
-<!-- UNTESTED -->
 ```
 []
 ```
@@ -500,7 +533,6 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST http://$CONTROL:8000/agents/register 
 
 `-X POST` sends a POST, `-H` adds a header, `-d` is the request body, and `-w` prints the HTTP status code after the response.
 
-<!-- UNTESTED -->
 ```
 {"detail":"invalid agent token"}
 HTTP 401
@@ -515,7 +547,6 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST http://$CONTROL:8000/agents/register 
   -d '{"node_id": "fake-node", "private_ip": "10.0.1.99", "nic": "ens5", "cpu_total": 2, "mem_total": 4000000000}'
 ```
 
-<!-- UNTESTED -->
 ```
 {"node_id":"fake-node","status":"registered","heartbeat_interval":10}
 HTTP 200
@@ -533,16 +564,18 @@ done
 
 `jq` reads JSON: `.[]` loops over the array, and `"\(.node_id)"` inserts a field into a string. `-r` prints plain text instead of JSON strings.
 
-<!-- UNTESTED -->
 ```
-fake-node  online  4s
-fake-node  online  9s
-...
-fake-node  online  29s
-fake-node  offline  34s
+fake-node  online  17s
+fake-node  online  22s
+fake-node  online  27s
+fake-node  online  32s
+fake-node  offline  37s
+fake-node  offline  42s
+fake-node  offline  47s
+fake-node  offline  52s
 ```
 
-Somewhere between 30 and 35 seconds (the checker runs every 5), `fake-node` turns `offline`. The control plane logged it:
+Your first number depends on how quickly you ran the loop after registering. Once the silence passes 30 seconds, the next run of the checker (every 5 seconds) turns `fake-node` `offline`. The control plane logged it:
 
 **workspace**
 ```bash
@@ -691,7 +724,6 @@ bash scripts/push.sh agent
 
 For each node, this copies `agent/`, installs its requirements (`httpx`, `psutil`) into a virtual environment, and starts `agent.service`. The unit file runs the agent as root (a later lab has it create network interfaces) and restarts it automatically if it crashes (`Restart=always`).
 
-<!-- UNTESTED -->
 ```
 ==> copied agent to node-01
 agent (re)started on node-01; logs: journalctl -u agent -f
@@ -706,9 +738,9 @@ Check what the agent on `node-01` logged:
 ssh node-01 'journalctl -u agent -n 5 --no-pager'
 ```
 
-<!-- UNTESTED -->
 ```
-... INFO registered as node-01 (10.0.1.21 via ens5)
+Oct 03 12:58:05 node-01 systemd[1]: Started agent.service - ECS lab agent.
+Oct 03 12:58:05 node-01 python[3617]: INFO registered as node-01 (10.0.1.21 via ens5)
 ```
 
 And the registry:
@@ -718,28 +750,21 @@ And the registry:
 curl -s http://$CONTROL:8000/agents | jq -r '.[] | "\(.node_id)  \(.status)  \(.private_ip)  cpu_free=\(.cpu_free)/\(.cpu_total)  last_seen=\(.seconds_since_seen)s ago"'
 ```
 
-<!-- UNTESTED -->
 ```
-fake-node  offline  10.0.1.99  cpu_free=null/2  last_seen=95s ago
-node-01  online  10.0.1.21  cpu_free=1.98/2  last_seen=3s ago
-node-02  online  10.0.1.22  cpu_free=1.97/2  last_seen=6s ago
+fake-node  offline  10.0.1.99  cpu_free=null/2  last_seen=210s ago
+node-01  online  10.0.1.21  cpu_free=1.99/2  last_seen=5s ago
+node-02  online  10.0.1.22  cpu_free=2.0/2  last_seen=7s ago
 ```
 
 `cpu_free` is `null` until the first heartbeat arrives, 10 seconds after registration. `last_seen` never grows past 10 seconds for a live agent. You can also open `http://CONTROL_IP:8000/agents` in your browser to see the raw JSON, or `http://CONTROL_IP:8000/docs` for FastAPI's interactive API page.
 
 ## Break it on purpose
 
-Kill an agent and watch the control plane notice. Stop the agent on `node-02`:
+Kill an agent and watch the control plane notice. This block stops the agent on `node-02` and *immediately* starts watching the registry for 45 seconds. Paste it as one block: if you stop the agent first and start watching later, `node-02` may already be `offline` and you'll miss the change.
 
 **workspace**
 ```bash
 ssh node-02 'sudo systemctl stop agent'
-```
-
-Watch the registry for 45 seconds:
-
-**workspace**
-```bash
 for i in $(seq 9); do
   curl -s http://$CONTROL:8000/agents | jq -r '.[] | select(.node_id != "fake-node") | "\(.node_id)  \(.status)  \(.seconds_since_seen)s"'
   echo --
@@ -770,7 +795,6 @@ sleep 3
 curl -s http://$CONTROL:8000/agents | jq -r '.[] | "\(.node_id)  \(.status)"'
 ```
 
-<!-- UNTESTED -->
 ```
 fake-node  offline
 node-01  online
@@ -788,19 +812,20 @@ Run the lab's check script:
 bash scripts/verify.sh
 ```
 
-<!-- UNTESTED -->
 ```
-== control plane http://13.250.x.x:8000 ==
+== control plane http://13.212.151.197:8000 ==
 ok: /health
 == agents (waiting up to 60s for 2 online) ==
 fake-node  offline  10.0.1.99  cpu_free=null/2  mem_free=0 MiB
-node-01  online  10.0.1.21  cpu_free=1.98/2  mem_free=3301 MiB
-node-02  online  10.0.1.22  cpu_free=1.97/2  mem_free=3310 MiB
+node-01  online  10.0.1.21  cpu_free=1.99/2  mem_free=3289 MiB
+node-02  online  10.0.1.22  cpu_free=1.98/2  mem_free=3299 MiB
 ok: 2 agents online
 == Temporal UI ==
-ok: http://13.250.x.x:8233/
+ok: http://13.212.151.197:8233/
 ALL CHECKS PASSED
 ```
+
+Your IP address and free-memory numbers will differ.
 
 You're done when you see `ALL CHECKS PASSED`, and:
 

@@ -49,7 +49,7 @@ Each tenant:
 | # | Folder | Student-facing title | Status |
 |---|---|---|---|
 | 00 | `lab-00-platform-check` | Platform check (author only, not published) | done |
-| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | solution built, doc drafted (outputs UNTESTED), not tested on Poridhi |
+| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | tested on Poridhi (all steps pass); real output in doc except setup/apply/env-file/control-plane-log/break-it/destroy blocks, still UNTESTED |
 | 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
 | 04 | `lab-04-logging` | Centralized Logging with Fluent Bit and Elasticsearch | not started |
@@ -268,6 +268,9 @@ What was built, and what the **next lab's title** adds.
 - **A failed `cd` doesn't stop a pasted block** (Lab 00). The rest of the paste ran in the wrong directory; `terraform init` "succeeded" in an empty folder and `apply` said "No configuration files". Fix: never assume the repo path; set a variable once (`KIT=$(pwd)`) and chain `cd DIR && cmd`, or put `cd` in its own block.
 - **`describe-regions --query 'Regions[0].RegionName'` prints `ap-south-1`**, not the configured region: it's just the first region in the list. It looks like a misconfiguration to students. Use `aws ec2 describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text` (prints `ap-southeast-1a`) as the EC2 credential probe.
 - **The workspace has no `rsync`** (Lab 00). `push.sh` uses `tar | ssh tar` instead.
+- **Time-sensitive observations must start in the same block as the action** (Lab 01). "Stop the agent" and "watch the registry" were separate blocks; on the real run the watch began ~65 s later and `node-02` was already `offline`, so the transition was never seen. Put the trigger and the watch loop in one block.
+- **`docker compose up` in a non-TTY ssh session prints hundreds of `Extracting` / `Pull complete` lines** on the first image pull (Lab 01). Harmless; tell students to expect it and show only the tail in the doc.
+- ✅ **Fixed private IPs work** (Lab 01): with `private_ip` set, agents registered as `10.0.1.21` / `10.0.1.22`.
 
 ---
 
