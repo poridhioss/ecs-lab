@@ -86,8 +86,13 @@ cd ecs-lab && ls
 
 `-b lab-01-start` checks out this lab's starting branch, and `--depth 1` downloads only its latest snapshot instead of the full history.
 
-<!-- UNTESTED -->
 ```
+Cloning into 'ecs-lab'...
+remote: Enumerating objects: 31, done.
+remote: Counting objects: 100% (31/31), done.
+remote: Compressing objects: 100% (30/30), done.
+remote: Total 31 (delta 0), reused 29 (delta 0), pack-reused 0 (from 0)
+Receiving objects: 100% (31/31), 10.08 KiB | 3.36 MiB/s, done.
 agent  control-plane  infra  scripts
 ```
 
@@ -117,7 +122,6 @@ Empty output means the account is clean. If it prints a VPC ID, or just to be sa
 bash scripts/preflight.sh
 ```
 
-<!-- UNTESTED -->
 ```
 clean: no leftovers from an earlier session
 ```
@@ -194,24 +198,33 @@ cd ~/code/ecs-lab/infra/terraform && terraform init && terraform apply -auto-app
 
 `terraform init` downloads the providers (plugins for AWS, local files, keys and random values). `apply` creates everything, and `-auto-approve` skips the "are you sure?" prompt. It takes about a minute.
 
-<!-- UNTESTED -->
+Terraform first prints its plan: every resource it will create, ending with `Plan: 14 to add, 0 to change, 0 to destroy.` In the plan, notice `private_ip = "10.0.1.10"` (and `.21`, `.22`) on the three machines. Then it creates them and prints the outputs:
+
 ```
+aws_instance.machine["control-01"]: Creation complete after 12s [id=i-03060e2a129c5e186]
+aws_instance.machine["node-01"]: Creation complete after 12s [id=i-0c4a05fc858121bbd]
+aws_instance.machine["node-02"]: Creation complete after 12s [id=i-07ac791e5af1ea34d]
+local_file.ssh_config: Creating...
+local_file.ssh_config: Creation complete after 0s [id=deefd9ffd798387524c96aae791832ffda303e31]
+
 Apply complete! Resources: 14 added, 0 changed, 0 destroyed.
 
 Outputs:
 
 agent_token = <sensitive>
-control_public_ip = "13.250.x.x"
+control_public_ip = "52.77.230.138"
 public_ips = {
-  "control-01" = "13.250.x.x"
-  "node-01" = "54.169.x.x"
-  "node-02" = "52.77.x.x"
+  "control-01" = "52.77.230.138"
+  "node-01" = "54.255.126.124"
+  "node-02" = "13.215.153.252"
 }
 urls = {
-  "control_plane" = "http://13.250.x.x:8000/agents"
-  "temporal_ui" = "http://13.250.x.x:8233/"
+  "control_plane" = "http://52.77.230.138:8000/agents"
+  "temporal_ui" = "http://52.77.230.138:8233/"
 }
 ```
+
+Your public IPs and instance IDs will differ. The agent token shows as `<sensitive>` because Terraform hides secrets in its output.
 
 Save the control plane's public IP and the agent token in shell variables. You'll use them throughout the lab:
 
@@ -225,6 +238,10 @@ echo "control plane: $CONTROL"
 
 `-chdir=infra/terraform` runs Terraform as if you were in that folder, and `-raw` prints the bare value without quotes. If you open a new terminal later, run these three lines again.
 
+```
+control plane: 52.77.230.138
+```
+
 Each machine is still installing Docker in the background. Wait until all three report ready:
 
 **workspace**
@@ -237,6 +254,12 @@ done
 
 The first-boot script writes `BOOTSTRAP DONE` at the end of its log, so this loop checks each machine every 5 seconds until it appears. Usually it's under a minute.
 
+```
+control-01 ready
+node-01 ready
+node-02 ready
+```
+
 **What now exists:** three Ubuntu machines with Docker installed. On each one, `/etc/ecs-lab/ecs-lab.env` holds that machine's settings:
 
 **workspace**
@@ -244,12 +267,13 @@ The first-boot script writes `BOOTSTRAP DONE` at the end of its log, so this loo
 ssh node-01 'sudo cat /etc/ecs-lab/ecs-lab.env'
 ```
 
-<!-- UNTESTED -->
 ```
 NODE_ID=node-01
 CONTROL_IP=10.0.1.10
-AGENT_TOKEN=Xk3...
+AGENT_TOKEN=RydWD0asm6YRSw4d...
 ```
+
+(Shortened here. Yours is a different random 32-character string, new every time you create the cluster.)
 
 The agent will read these three values: its own name, where the control plane is, and the secret token. Terraform filled in `CONTROL_IP` from the same `machines` map, so it always matches the address `control-01` really has. Check it:
 
@@ -260,7 +284,6 @@ ssh control-01 'hostname; hostname -I'
 
 `hostname -I` lists the machine's IP addresses. The first one is its private IP on the VPC (Docker's own internal address may follow it).
 
-<!-- UNTESTED -->
 ```
 control-01
 10.0.1.10 172.17.0.1
@@ -584,11 +607,15 @@ ssh control-01 'journalctl -u control-plane -n 5 --no-pager'
 
 `journalctl -u control-plane` shows that service's logs, `-n 5` the last five lines, and `--no-pager` prints them instead of opening a scrollable viewer.
 
-<!-- UNTESTED -->
 ```
-... INFO agent fake-node registered (10.0.1.99 via ens5)
-... WARNING agent fake-node is offline (no heartbeat for 30s)
+Oct 03 15:19:38 control-01 uvicorn[4521]: INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+Oct 03 15:19:39 control-01 uvicorn[4521]: INFO:     127.0.0.1:49174 - "GET /health HTTP/1.1" 200 OK
+Oct 03 15:19:44 control-01 uvicorn[4521]: INFO agent fake-node registered (10.0.1.99 via ens5)
+Oct 03 15:19:44 control-01 uvicorn[4521]: INFO:     103.191.50.64:55900 - "POST /agents/register HTTP/1.1" 200 OK
+Oct 03 15:20:18 control-01 uvicorn[4521]: WARNING agent fake-node is offline (no heartbeat for 30s)
 ```
+
+The lines starting `INFO:     ` (with spaces) are Uvicorn's request log; the others are from your code. Compare the timestamps: registered at `15:19:44`, marked offline at `15:20:18`, 34 seconds later. Your registration request shows the workspace's public IP, because `curl` ran there.
 
 `fake-node` stays in the registry as an offline machine for the rest of the lab. That's fine; it shows what a dead node looks like.
 
@@ -774,19 +801,37 @@ done
 
 `select(...)` filters out `fake-node` so you can focus on the real nodes.
 
-<!-- UNTESTED -->
 ```
-node-01  online  2s
-node-02  online  8s
+node-01  online  6s
+node-02  online  5s
 --
-...
+node-01  online  1s
+node-02  online  10s
 --
-node-01  online  4s
-node-02  offline  33s
+node-01  online  6s
+node-02  online  15s
+--
+node-01  online  1s
+node-02  online  20s
+--
+node-01  online  6s
+node-02  online  26s
+--
+node-01  online  1s
+node-02  online  31s
+--
+node-01  online  6s
+node-02  offline  36s
+--
+node-01  online  1s
+node-02  offline  41s
+--
+node-01  online  6s
+node-02  offline  46s
 --
 ```
 
-`node-01` keeps resetting to under 10 seconds, while `node-02` climbs past 30 and flips to `offline`. Now bring it back:
+`node-01` keeps resetting to under 10 seconds, because its heartbeats keep arriving. `node-02` climbs past 30 and, at the next check, flips to `offline`. Now bring it back:
 
 **workspace**
 ```bash
@@ -860,19 +905,23 @@ cd ~/code/ecs-lab && bash scripts/destroy.sh
 
 This runs `terraform destroy -auto-approve`, which deletes the machines, network, SSH key pair and token, and then checks that nothing is left.
 
-<!-- UNTESTED -->
+Terraform first prints everything it will delete, ending with `Plan: 0 to add, 0 to change, 14 to destroy.` Deleting takes about a minute, mostly waiting for the machines to shut down. The output ends like this:
+
 ```
+aws_instance.machine["control-01"]: Destruction complete after 31s
+aws_instance.machine["node-02"]: Destruction complete after 31s
+...
+aws_vpc.main: Destroying... [id=vpc-0b9160d3c1e3e4cfe]
+aws_vpc.main: Destruction complete after 1s
+
 Destroy complete! Resources: 14 destroyed.
 == leftover check: all three lists should be empty ==
 running instances:
-
 ecs-lab VPCs:
-
 ecs-lab key pairs:
-
 ```
 
-All three lists must be empty.
+Nothing should be printed after the three headings. If something is, run `bash scripts/destroy.sh` again, or `bash scripts/preflight.sh` to delete leftovers by name.
 
 ## Summary
 

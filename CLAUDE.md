@@ -49,7 +49,7 @@ Each tenant:
 | # | Folder | Student-facing title | Status |
 |---|---|---|---|
 | 00 | `lab-00-platform-check` | Platform check (author only, not published) | done |
-| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | tested on Poridhi (all steps pass); real output in doc except setup/apply/env-file/control-plane-log/break-it/destroy blocks, still UNTESTED |
+| 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | **done**: tested on Poridhi, all output in the doc is real; branches `lab-01-start`, `lab-01-solution` |
 | 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
 | 04 | `lab-04-logging` | Centralized Logging with Fluent Bit and Elasticsearch | not started |
@@ -276,4 +276,4 @@ What was built, and what the **next lab's title** adds.
 
 ## Current state
 
-Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 reference solution built (`infra/terraform`, `infra/control`, `control-plane/`, `agent/`, `scripts/`); Terraform validated and control-plane routing/auth tested locally, but not yet run on Poridhi. Lab 01 document drafted at `docs/labs/lab-01-control-plane/README.md`; its code blocks are checked to match `main.py`/`agent.py` byte for byte, and every sample output is marked `<!-- UNTESTED -->`. Next: Adid runs the doc on Poridhi from branch `lab-01-start` (= `main` minus `control-plane/main.py`, `agent/agent.py` and author-only files), then real output replaces the UNTESTED blocks.
+Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 done: tested end to end on Poridhi; the doc (`docs/labs/lab-01-control-plane/README.md`) has only real output, and its code blocks match `main.py`/`agent.py` byte for byte. Branches: `lab-01-start` (= `main` minus `control-plane/main.py`, `agent/agent.py` and author-only files) and `lab-01-solution` (= start + those two files). Next: Lab 02 (VXLAN), reference solution first.
