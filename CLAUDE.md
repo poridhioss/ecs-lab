@@ -50,7 +50,7 @@ Each tenant:
 |---|---|---|---|
 | 00 | `lab-00-platform-check` | Platform check (author only, not published) | done |
 | 01 | `lab-01-control-plane` | Building the Control Plane and Registering Agents | **done**: tested on Poridhi, all output in the doc is real; branches `lab-01-start`, `lab-01-solution` |
-| 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | not started |
+| 02 | `lab-02-vxlan` | Isolating Tenants with a VXLAN Overlay Network | solution built, doc drafted (outputs UNTESTED), branch `lab-02-start`; not tested on Poridhi |
 | 03 | `lab-03-lifecycle` | Managing Container Lifecycles with Temporal | not started |
 | 04 | `lab-04-logging` | Centralized Logging with Fluent Bit and Elasticsearch | not started |
 | 05 | `lab-05-metrics` | Monitoring the Cluster with Prometheus and Grafana | not started |
@@ -103,6 +103,10 @@ Do not change these without asking.
 - **Code delivery:** students edit code in the workspace VS Code; `scripts/push.sh` copies it to the EC2 machines (`tar czf - ... | ssh HOST tar xzf -`; the workspace has no `rsync`) and restarts services. Catch-up uses the same script. EC2 machines never clone the repo.
 - **Orchestration:** Temporal Python SDK; task queue per node named after the **registered node ID** (`node-01`), never the hostname. Activities run on the node queues; **workflows run on a worker on `control-01`** (task queue `lifecycle`), so a dead node can still be marked `failed`.
 - **Agent → control plane:** HTTP with a shared agent token
+- **Control plane → agent:** the agent runs its own FastAPI on port 5050 (same event loop as heartbeats, `uvicorn.Server`), same `X-Agent-Token` check. `PUT /networks/{tenant_id}` builds a tenant network on that node and returns the list of changes (empty = already up to date).
+- **Tenant allocation:** `POST /tenants/{tenant_id}/network` (idempotent): n-th tenant gets VXLAN `n*100` and `10.10.n.0/24`. Node slices come from a fixed `NODE_SLOTS` map in the control plane (`node-01` → lower `/25`, `node-02` → upper `/25`, gateway = first host of the slice). Tenant IDs: `^[a-z][a-z0-9]{0,11}$` (`br-` + 12 = 15-char interface name limit).
+- **Tenant networks on the node:** Docker network named after the tenant (bridge `br-<tenant>`, label `tenant_id`), `vxlan<id>` with `nolearning` on the default-route NIC, all-zeros FDB entries per peer (AWS VPCs have no multicast, so peers are listed statically). Not persistent across reboots or sessions: re-run the endpoint (catch-up does).
+- **Test containers:** `busybox:1.37` with static `--ip` (node-01: `.10`, node-02: `.140`).
 - **Users → control plane:** Authentik JWT (RS256, JWKS); `tenant_id` from the `groups` claim, **never** from the request body
 - **Browser login:** authorization code flow with the **code exchanged by the control plane** (`/callback`, confidential client with a secret). Not browser PKCE: `crypto.subtle` doesn't exist on a plain-HTTP public-IP origin.
 - **Authentik config:** created by script (blueprints or API), with issuer and redirect URIs templated from the current session's public IPs. Never by clicking in the UI.
@@ -276,4 +280,6 @@ What was built, and what the **next lab's title** adds.
 
 ## Current state
 
-Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 done: tested end to end on Poridhi; the doc (`docs/labs/lab-01-control-plane/README.md`) has only real output, and its code blocks match `main.py`/`agent.py` byte for byte. Branches: `lab-01-start` (= `main` minus `control-plane/main.py`, `agent/agent.py` and author-only files) and `lab-01-solution` (= start + those two files). Next: Lab 02 (VXLAN), reference solution first.
+Lab 00 done (results in PORIDHI_PLATFORM.md). Lab 01 done: tested end to end on Poridhi; the doc (`docs/labs/lab-01-control-plane/README.md`) has only real output, and its code blocks match `main.py`/`agent.py` byte for byte. Branches: `lab-01-start` (= `main` minus `control-plane/main.py`, `agent/agent.py` and author-only files) and `lab-01-solution` (= start + those two files).
+
+Lab 02: solution on `main` (`control-plane/main.py` tenant section, `agent/network.py`, agent API in `agent/agent.py`, `catchup.sh` re-creates alpha/beta, `verify.sh` checks tunnels). Tested locally with fakes (subnet split, specs sent to agents, idempotent re-run, token check), not yet on Poridhi. Doc at `docs/labs/lab-02-vxlan/README.md`; its edit steps were checked by applying them to the `lab-01-solution` files, which reproduces the new files exactly. Branch `lab-02-start` = `lab-01-solution` + the two new `requirements.txt` (its `catchup.sh`/`verify.sh` stay at the Lab 01 versions on purpose: they restore the *previous* lab's end state). Next: Adid runs the Lab 02 doc on Poridhi; then fill real output and cut `lab-02-solution`.

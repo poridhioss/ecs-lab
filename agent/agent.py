@@ -7,10 +7,16 @@ every few seconds so the control plane knows it is alive.
 import asyncio
 import logging
 import os
+import secrets
 import socket
 
 import httpx
 import psutil
+import uvicorn
+from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel
+
+import network
 
 NODE_ID = os.environ["NODE_ID"]                          # e.g. node-01, set by Terraform
 CONTROL_PLANE = f"http://{os.environ['CONTROL_IP']}:8000"
@@ -58,6 +64,34 @@ def capacity():
     }
 
 
+# ---------- the agent's own API: the control plane calls it ----------
+
+AGENT_PORT = 5050
+api = FastAPI(title=f"ECS Lab Agent ({NODE_ID})")
+
+
+def require_agent_token(x_agent_token: str = Header(default="")):
+    """Only the control plane (which knows the shared token) may give orders."""
+    if not secrets.compare_digest(x_agent_token, HEADERS["X-Agent-Token"]):
+        raise HTTPException(status_code=401, detail="invalid agent token")
+
+
+class NetworkSpec(BaseModel):
+    vxlan_id: int       # the tenant's VXLAN number, e.g. 100
+    subnet: str         # the whole tenant subnet, e.g. 10.10.1.0/24
+    ip_range: str       # this node's half of it, e.g. 10.10.1.0/25
+    gateway: str        # this node's gateway in that half, e.g. 10.10.1.1
+    peers: list[str]    # private IPs of the other nodes
+
+
+@api.put("/networks/{tenant_id}", dependencies=[Depends(require_agent_token)])
+async def put_network(tenant_id: str, spec: NetworkSpec):
+    # Runs shell commands and waits on Docker: do it on a thread, so heartbeats keep flowing.
+    changes = await asyncio.to_thread(network.setup_tenant_network, tenant_id, spec, default_nic())
+    log.info("tenant %s network: %s", tenant_id, "; ".join(changes) or "already up to date")
+    return {"node_id": NODE_ID, "changes": changes}
+
+
 async def register(client):
     """Keep trying until the control plane accepts us. Returns the heartbeat interval."""
     body = registration()
@@ -72,7 +106,7 @@ async def register(client):
             await asyncio.sleep(5)
 
 
-async def main():
+async def heartbeats():
     psutil.cpu_percent(interval=None)  # first call only sets the baseline
     async with httpx.AsyncClient(base_url=CONTROL_PLANE, headers=HEADERS, timeout=5) as client:
         interval = await register(client)
@@ -86,6 +120,14 @@ async def main():
                 r.raise_for_status()
             except httpx.HTTPError as e:
                 log.warning("heartbeat failed: %s", e)
+
+
+async def main():
+    # Two jobs in one process: heartbeats in the background, the API in front.
+    beating = asyncio.create_task(heartbeats())
+    server = uvicorn.Server(uvicorn.Config(api, host="0.0.0.0", port=AGENT_PORT, log_level="warning"))
+    await server.serve()  # runs until the service is stopped
+    beating.cancel()
 
 
 if __name__ == "__main__":
