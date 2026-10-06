@@ -164,16 +164,60 @@ bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.22
 
 The all-zeros address means "any frame I don't have a specific entry for (broadcasts, and unknown destinations): send a copy to `10.0.1.22`". With one such entry per peer node, every broadcast reaches every node. The interface is created with `nolearning`, so it never adds entries on its own: the control plane, which knows all nodes, is the only source of truth.
 
-### Two nodes, one subnet: split the addresses
+### Who gets which IP address
 
-`alpha`'s subnet `10.10.1.0/24` now exists on both nodes. But each node's Docker hands out container IPs on its own, without asking the other. If both started at `10.10.1.2`, two containers would get the same address. So each node owns half of every tenant subnet:
+This lab has two separate sets of IP addresses, and it's easy to mix them up.
 
-| | node-01 | node-02 |
+**1. Node addresses, from the VPC subnet `10.0.1.0/24`.** These belong to the EC2 machines. Terraform created this subnet inside the VPC, and AWS gave each machine its fixed address from it: `node-01` is `10.0.1.21` and `node-02` is `10.0.1.22`. They're real network cards on a real network, and the VXLAN tunnel uses them: tunnel packets travel from `10.0.1.21` to `10.0.1.22`.
+
+**2. Container addresses, from a tenant subnet.** Each tenant gets its own subnet: `alpha` gets `10.10.1.0/24` and `beta` gets `10.10.2.0/24`. AWS knows nothing about these. The **control plane** chooses them (the `allocate_tenant` function you'll write in Step 1), and the **agent** on each node passes them to that node's Docker when it creates the tenant's Docker network. Tenant containers get their addresses from them. These addresses exist only on the tenant's bridges and inside its tunnel. The VPC never sees them directly, because they always travel wrapped inside a tunnel packet between node addresses.
+
+| | VPC subnet | Tenant subnet (alpha's) |
+|---|---|---|
+| Addresses | `10.0.1.0/24` | `10.10.1.0/24` |
+| Chosen by | Terraform | The control plane |
+| Made real by | AWS, as part of the VPC | Docker on each node, as the Docker network `alpha` |
+| Used by | The EC2 machines (`10.0.1.21`, `10.0.1.22`) | `alpha`'s containers (`10.10.1.10`, `10.10.1.140`) |
+
+The two look alike (`10.0.1.` vs `10.10.1.`), so read carefully: everything in the rest of this section is about **tenant** subnets.
+
+Here is how the two sets fit together for tenant `alpha`:
+
+```
+        node-01  (node address 10.0.1.21)               node-02  (node address 10.0.1.22)
+ ┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
+ │  alpha-1                             │        │                             alpha-2  │
+ │  10.10.1.10                          │        │                         10.10.1.140  │
+ │     │                                │        │                                │     │
+ │  br-alpha  (bridge IP 10.10.1.1)     │        │     (bridge IP 10.10.1.129)  br-alpha│
+ │     │                                │        │                                │     │
+ │  vxlan100 ─────── ens5 ══════════ tunnel, UDP 4789 ══════════ ens5 ─────── vxlan100   │
+ └──────────────────────────────────────┘        └──────────────────────────────────────┘
+          one switch, one subnet for alpha: 10.10.1.0/24, spread over both nodes
+```
+
+**Why both nodes share one subnet.** A **subnet** is a block of addresses that all sit on the same local network. `10.10.1.0/24` means "every address that starts with `10.10.1.`", which is 256 addresses, `10.10.1.0` to `10.10.1.255`. (The `/24` says the first 24 bits, the first three numbers, are fixed.) The tunnel joins `alpha`'s two bridges into **one** switch, so all of `alpha`'s containers are on one local network, on whichever node they run. One local network means one subnet. That's what lets `alpha-1` reach `alpha-2` directly, as described in "Same subnet, same switch" above.
+
+**Problem 1: two nodes could hand out the same address.** When an `alpha` container starts, the Docker engine *on that node* picks a free address for it from the Docker network `alpha`, that is, from `alpha`'s tenant subnet `10.10.1.0/24` (never from the VPC's `10.0.1.0/24`). Each node has its own Docker network `alpha` with its own address bookkeeping, and it only knows about the containers on that node; it can't see the other node's. Suppose both nodes picked from the whole tenant subnet:
+
+- `node-01` starts an `alpha` container. Docker picks the first free address: `10.10.1.2`.
+- `node-02` starts an `alpha` container. Its Docker also sees `10.10.1.2` as free (nothing on *its* bridge uses it), and picks it too.
+- Now two containers on the same switch share one address. Packets meant for one arrive at the other, at random.
+
+**Fix: each node gets its own half of the subnet.** A `/25` is half of a `/24`: 128 addresses instead of 256. `10.10.1.0/25` covers `.0` to `.127`, and `10.10.1.128/25` covers `.128` to `.255`. Each node's Docker is told to pick only from its own half (Docker calls this the network's **IP range**), so the two can never collide. The cost: each node can run at most about 126 containers per tenant, plenty for this course.
+
+**Problem 2: each node needs its own gateway.** When a container sends a packet to an address *outside* its subnet, for example to download something from the internet, it can't deliver it directly. It hands the packet to its **gateway**, which forwards it on. On a Docker network the gateway is the **bridge's own IP address**: the node itself acts as the router. Each node's bridge needs an IP, so a container can use its own node as the way out. But both bridges are on the same switch, and two devices on one switch can't share an address. So each node's bridge takes the first address of that node's half: `10.10.1.1` on `node-01` and `10.10.1.129` on `node-02`.
+
+Putting it together, this is what the control plane gives each node:
+
+| Tenant (subnet) | node-01: IP range and gateway | node-02: IP range and gateway |
 |---|---|---|
 | alpha (`10.10.1.0/24`) | `10.10.1.0/25`, gateway `10.10.1.1` | `10.10.1.128/25`, gateway `10.10.1.129` |
 | beta (`10.10.2.0/24`) | `10.10.2.0/25`, gateway `10.10.2.1` | `10.10.2.128/25`, gateway `10.10.2.129` |
 
-Each node's bridge also needs its **own gateway** address (the bridge's IP, which containers use to reach the outside world). Two bridges joined into one switch can't both be `10.10.1.1`.
+`beta` follows the same pattern in its own subnet, `10.10.2.0/24`. It has nothing to do with `alpha`'s: different addresses, different bridges, a different tunnel. Later in this lab you'll give the test containers fixed addresses from each node's half: `.10` on `node-01`, `.140` on `node-02`.
+
+This design rests on two assumptions, both true in this course: there are exactly **two** nodes (a third would need the subnets split into quarters), and each tenant needs **one** `/24` (at most 256 addresses across the cluster).
 
 ### Three layers of isolation
 
