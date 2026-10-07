@@ -206,7 +206,20 @@ Here is how the two sets fit together for tenant `alpha`:
 
 **Fix: each node gets its own half of the subnet.** A `/25` is half of a `/24`: 128 addresses instead of 256. `10.10.1.0/25` covers `.0` to `.127`, and `10.10.1.128/25` covers `.128` to `.255`. Each node's Docker is told to pick only from its own half (Docker calls this the network's **IP range**), so the two can never collide. The cost: each node can run at most about 126 containers per tenant, plenty for this course.
 
-**Problem 2: each node needs its own gateway.** When a container sends a packet to an address *outside* its subnet, for example to download something from the internet, it can't deliver it directly. It hands the packet to its **gateway**, which forwards it on. On a Docker network the gateway is the **bridge's own IP address**: the node itself acts as the router. Each node's bridge needs an IP, so a container can use its own node as the way out. But both bridges are on the same switch, and two devices on one switch can't share an address. So each node's bridge takes the first address of that node's half: `10.10.1.1` on `node-01` and `10.10.1.129` on `node-02`.
+**Problem 2: each node needs its own gateway address.** First, what a gateway is. When a container sends a packet to an address *outside* its tenant subnet, for example to download something from the internet, it can't deliver it directly. It hands the packet to its **gateway**, which forwards it on.
+
+On a Docker network, the gateway is the node itself. A Linux bridge does two jobs at once: it's the **switch** the containers plug into, and it's also the **node's own connection** to that switch. The IP address Docker gives the bridge belongs to the node, as a member of the tenant's network. Containers use that address as their gateway, and the node forwards their outside traffic.
+
+Now remember that the tunnel joins `alpha`'s two bridges into **one** switch. So both nodes are members of `alpha`'s network, each through its own `br-alpha`. On that single switch there are four addresses:
+
+| Member of alpha's network | Address |
+|---|---|
+| `alpha-1` (container on node-01) | `10.10.1.10` |
+| `alpha-2` (container on node-02) | `10.10.1.140` |
+| node-01, through its `br-alpha` | `10.10.1.1` |
+| node-02, through its `br-alpha` | `10.10.1.129` |
+
+Why can't both nodes use `10.10.1.1`? When `alpha-1` needs its gateway, it broadcasts "who has `10.10.1.1`?". The broadcast travels through the tunnel, so **both** nodes hear it, and both would answer. `alpha-1` would then send its outside traffic to whichever answer arrived last, sometimes node-02 on the far side of the tunnel. With different addresses, each container has exactly one gateway: its own node. Each node uses the first address of its half: `10.10.1.1` on `node-01`, `10.10.1.129` on `node-02`.
 
 Putting it together, this is what the control plane gives each node:
 
@@ -227,9 +240,30 @@ How do we know `beta` can never reach `alpha`?
 2. **Separate tunnels.** VNI 100 traffic only ever reaches `br-alpha` bridges.
 3. **No routing between tenants.** A `beta` container could still try sending to `10.10.1.140` through its gateway, which is the node itself, and the node *does* have a route to `10.10.1.0/24` (via `br-alpha`). What stops it is Docker: it installs firewall rules that drop traffic between different Docker networks. Without that rule, the node would happily route `beta`'s packets into `alpha`'s network.
 
-### Idempotent setup
+### Safe to repeat: describing the goal, not the steps
 
-Every step the agent takes checks first: does the Docker network exist? Does `vxlan100` exist? Is this peer already in the FDB? It only changes what's missing. So the control plane can send the same request again at any time, after an agent restarts, after a node reboots, or just to be sure, and the network ends up correct. You'll use this to repair a broken tunnel in the break-it exercise. The catch-up at the start of the next lab depends on it too: the database is new every session, so tenant networks are simply created again.
+There are two ways to ask for a warm room:
+
+- **"Heat for 10 minutes"** is an *action*. Ask twice and the room overheats. Ask after a power cut and you don't know where you'll end up.
+- **"Set the thermostat to 22°C"** is a *goal*. Ask twice and nothing changes. Ask after a power cut and the room gets back to 22°C.
+
+The control plane talks to agents the second way. `PUT /networks/alpha` doesn't say "run these commands". It says "on this node, alpha's network should look like *this*": this subnet, this half, this gateway, these peers. The agent then walks through a checklist and only acts where the node doesn't match yet:
+
+| Check | 1st request (empty node) | Same request again | After someone deleted the FDB entry |
+|---|---|---|---|
+| Docker network `alpha` exists? | no → create it | yes → skip | yes → skip |
+| `vxlan100` exists? | no → create it | yes → skip | yes → skip |
+| Plug `vxlan100` into `br-alpha`, switch it on | do it | do it (harmless) | do it (harmless) |
+| Peer `10.0.1.22` in the FDB? | no → add it | yes → skip | **no → add it** |
+| The agent replies with these `changes` | 3 items | `[]` | `["added peer 10.0.1.22"]` |
+
+Without the checks, repeating a request would break things: `ip link add vxlan100` fails with `File exists`, Docker refuses to create a second network named `alpha`, and a second FDB entry for the same peer makes every broadcast go to that peer twice.
+
+A request that gives the same result however many times you send it is called **idempotent**. You'll rely on that three times:
+
+1. **Repeating safely.** In Step 5 you send the `alpha` request a second time and see `[]` from both nodes: nothing to do.
+2. **Repairing.** In the break-it exercise you delete an FDB entry by hand, send the same request again, and watch the agent add back just that entry. A node reboot is similar: the Docker network survives a reboot, but `vxlan100` doesn't, and the same request re-creates only the tunnel.
+3. **Catching up.** The next lab starts on brand-new machines with an empty database, so there's no saved network to restore. Instead, its catch-up script sends the same two requests you send by hand in this lab, `POST /tenants/alpha/network` and `.../beta/network`. On empty nodes every check says "missing", so everything gets built again, by the same code. Allocation is idempotent too: `alpha` is created first, so it gets VXLAN 100 and `10.10.1.0/24` again.
 
 ## Steps
 
