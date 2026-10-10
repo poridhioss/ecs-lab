@@ -18,29 +18,7 @@ This is the "per-tenant VXLAN bridge for isolation" from the final exam's agent 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    CP["control-01<br/>POST /tenants/alpha/network"]
-    subgraph N1["node-01 · 10.0.1.21"]
-        A1C["alpha-1<br/>10.10.1.10"] --- BA1["br-alpha<br/>gw 10.10.1.1"]
-        B1C["beta-1<br/>10.10.2.10"] --- BB1["br-beta<br/>gw 10.10.2.1"]
-        BA1 --- VA1["vxlan100"]
-        BB1 --- VB1["vxlan200"]
-        VA1 --- E1["ens5"]
-        VB1 --- E1
-    end
-    subgraph N2["node-02 · 10.0.1.22"]
-        A2C["alpha-2<br/>10.10.1.140"] --- BA2["br-alpha<br/>gw 10.10.1.129"]
-        B2C["beta-2<br/>10.10.2.140"] --- BB2["br-beta<br/>gw 10.10.2.129"]
-        BA2 --- VA2["vxlan100"]
-        BB2 --- VB2["vxlan200"]
-        VA2 --- E2["ens5"]
-        VB2 --- E2
-    end
-    CP -- "PUT /networks/alpha (port 5050)" --> N1
-    CP -- "PUT /networks/alpha (port 5050)" --> N2
-    E1 <== "UDP 4789: VNI 100 and VNI 200 frames" ==> E2
-```
+![alt text](images/lab2.png)
 
 Each node has one bridge per tenant. Each bridge has a VXLAN interface plugged in, which wraps the tenant's traffic in UDP packets and sends them over the real network card (`ens5`) to the other node. There, the matching VXLAN interface unwraps them into the same tenant's bridge.
 

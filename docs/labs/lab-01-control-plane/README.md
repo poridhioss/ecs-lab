@@ -23,34 +23,7 @@ By the end of this lab you will have:
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph WS["Workspace (Poridhi VS Code)"]
-        TF["Terraform"]
-        PUSH["scripts/push.sh"]
-    end
-    subgraph VPC["AWS VPC 10.0.0.0/16"]
-        subgraph C["control-01 · 10.0.1.10"]
-            CP["Control plane<br/>FastAPI :8000"]
-            PG[("Postgres<br/>agents table")]
-            TMP["Temporal :7233<br/>UI :8233"]
-            CP --> PG
-        end
-        subgraph N1["node-01 · 10.0.1.21"]
-            A1["Agent"]
-        end
-        subgraph N2["node-02 · 10.0.1.22"]
-            A2["Agent"]
-        end
-        A1 -- "register, then heartbeat every 10s" --> CP
-        A2 -- "register, then heartbeat every 10s" --> CP
-    end
-    TF -- "creates" --> VPC
-    PUSH -- "ssh: copy code + install" --> C
-    PUSH -- "ssh" --> N1
-    PUSH -- "ssh" --> N2
-    B["Your browser"] -- "public IP :8000, :8233" --> C
-```
+![alt text](images/lab1.png)
 
 You work from the **workspace**. It creates the machines, holds the SSH key, and pushes code to them. You write code in VS Code on the workspace, then `scripts/push.sh` copies it to the right machine and (re)starts it.
 

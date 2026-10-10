@@ -24,28 +24,7 @@ This lab covers the final exam's "Container Lifecycle Management with Temporal" 
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    U["You (curl)"] -- "POST /containers" --> CP
-    subgraph C["control-01"]
-        CP["Control plane<br/>schedule + start workflow"]
-        PG[("Postgres<br/>containers table")]
-        T["Temporal server<br/>:7233, UI :8233"]
-        LW["Lifecycle worker<br/>(in the control plane)<br/>runs the workflows"]
-        CP --> PG
-        CP -- "start workflow" --> T
-        T <-- "queue: lifecycle" --> LW
-        LW -- "record_status" --> PG
-    end
-    subgraph N1["node-01"]
-        W1["Agent's worker<br/>queue: node-01"] --> D1["Docker"]
-    end
-    subgraph N2["node-02"]
-        W2["Agent's worker<br/>queue: node-02"] --> D2["Docker"]
-    end
-    T <-- "launch / check / stop" --> W1
-    T <-- "launch / check / stop" --> W2
-```
+![alt text](images/lab3.png)
 
 The control plane picks a node and starts a workflow. The workflow runs on a worker inside the control plane. Each time it needs Docker work done, it puts an activity on the chosen node's **task queue** (`node-01` or `node-02`), and that node's agent picks it up and runs it.
 
@@ -715,17 +694,26 @@ What's new here:
 
 <!-- UNTESTED -->
 ```
-{"container_id":"alpha-3f9a1c2e","node_id":"node-02","status":"pending","workflow_id":"container-alpha-3f9a1c2e"}
---- on node-02:
-NAMES            STATUS                  TENANT_ID
-alpha-3f9a1c2e   Up Less than a second   alpha
+{"container_id":"alpha-104cbd5a","node_id":"node-01","status":"pending","workflow_id":"container-alpha-104cbd5a"}
+--- on node-01:
+NAMES            STATUS        tenant id
+alpha-104cbd5a   Up 1 second   alpha
 --- status every 5s:
-running  node-02  10.10.1.130
-running  node-02  10.10.1.130
-...
-running  node-02  10.10.1.130
-expired  node-02  10.10.1.130  TTL of 90s reached
-expired  node-02  10.10.1.130  TTL of 90s reached
+running  node-01  10.10.1.2  
+running  node-01  10.10.1.2  
+running  node-01  10.10.1.2  
+
+.
+.
+. 
+running  node-01  10.10.1.2  
+running  node-01  10.10.1.2  
+running  node-01  10.10.1.2  
+expired  node-01  10.10.1.2  TTL of 90s reached
+expired  node-01  10.10.1.2  TTL of 90s reached
+expired  node-01  10.10.1.2  TTL of 90s reached
+expired  node-01  10.10.1.2  TTL of 90s reached
+expired  node-01  10.10.1.2  TTL of 90s reached
 ```
 
 The container went from `pending` to `running` within a few seconds, on the scheduled node, with an IP from that node's half of `alpha`'s subnet. After 90 seconds the workflow stopped it and recorded `expired`. Nobody had to watch it. Run the `ssh $NODE 'docker ps ...'` line again now: the list is empty, because the workflow removed the container.
