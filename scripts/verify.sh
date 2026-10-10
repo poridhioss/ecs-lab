@@ -25,4 +25,18 @@ echo "== Temporal UI =="
 curl -sf -o /dev/null "http://$CONTROL:8233/" || fail "Temporal UI not reachable on :8233"
 echo "ok: http://$CONTROL:8233/"
 
+echo "== tenant networks =="
+TENANTS=$(curl -sf "http://$CONTROL:8000/tenants" | jq -r '.[] | "\(.tenant_id):\(.vxlan_id)"')
+for t in alpha beta; do
+  echo "$TENANTS" | grep -q "^$t:" || fail "tenant $t not allocated"
+done
+for node in node-01 node-02; do
+  for pair in $TENANTS; do
+    t=${pair%%:*}; vni=${pair##*:}
+    ssh "$node" "ip -o link show vxlan$vni | grep -q 'master br-$t' && bridge fdb show dev vxlan$vni | grep -q dst" \
+      || fail "$node: vxlan$vni missing, not attached to br-$t, or has no peer"
+    echo "ok: $node vxlan$vni attached to br-$t, peer set"
+  done
+done
+
 echo "ALL CHECKS PASSED"

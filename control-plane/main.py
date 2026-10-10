@@ -4,11 +4,14 @@ For now it keeps a registry of agents (one per compute node): who they are,
 what they have, and whether they are still alive.
 """
 import asyncio
+import ipaddress
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 
+import httpx
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException
 from psycopg.rows import dict_row
@@ -34,6 +37,13 @@ CREATE TABLE IF NOT EXISTS agents (
     status        TEXT NOT NULL,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id  TEXT PRIMARY KEY,
+    vxlan_id   INTEGER NOT NULL UNIQUE,
+    subnet     TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -150,3 +160,75 @@ def list_agents():
                       EXTRACT(EPOCH FROM now() - last_seen)::int AS seconds_since_seen
                FROM agents ORDER BY node_id"""
         ).fetchall()
+
+
+# ---------- tenant networks ----------
+
+# Every node owns one half of every tenant subnet, so two nodes never give out
+# the same container IP: node-01 gets x.x.x.0/25, node-02 gets x.x.x.128/25.
+NODE_SLOTS = {"node-01": 0, "node-02": 1}
+AGENT_PORT = 5050
+# Linux interface names are at most 15 characters: "br-" + 12 is the limit.
+TENANT_ID = re.compile(r"^[a-z][a-z0-9]{0,11}$")
+
+
+def allocate_tenant(tenant_id):
+    """Give a tenant the next free VXLAN ID and /24. Asking again returns the same ones."""
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO tenants (tenant_id, vxlan_id, subnet)
+               SELECT %(tenant_id)s, n * 100, '10.10.' || n || '.0/24'
+               FROM (SELECT COALESCE(MAX(vxlan_id) / 100, 0) + 1 AS n FROM tenants) AS alloc
+               ON CONFLICT (tenant_id) DO NOTHING""",
+            {"tenant_id": tenant_id},
+        )
+        return conn.execute(
+            "SELECT tenant_id, vxlan_id, subnet FROM tenants WHERE tenant_id = %s", (tenant_id,)
+        ).fetchone()
+
+
+def node_slice(subnet, node_id):
+    """This node's half of the tenant subnet, and its gateway (the first address in it)."""
+    half = list(ipaddress.ip_network(subnet).subnets(new_prefix=25))[NODE_SLOTS[node_id]]
+    return str(half), str(next(half.hosts()))
+
+
+@app.post("/tenants/{tenant_id}/network")
+def create_tenant_network(tenant_id: str):
+    if not TENANT_ID.match(tenant_id):
+        raise HTTPException(status_code=400, detail="tenant_id: lowercase letters and digits, max 12")
+    tenant = allocate_tenant(tenant_id)
+
+    with db() as conn:
+        online = conn.execute(
+            "SELECT node_id, private_ip FROM agents WHERE status = 'online' ORDER BY node_id"
+        ).fetchall()
+    nodes = [n for n in online if n["node_id"] in NODE_SLOTS]
+
+    # Tell every node to build its part of the network, and where its peers are.
+    results = {}
+    for node in nodes:
+        ip_range, gateway = node_slice(tenant["subnet"], node["node_id"])
+        spec = {
+            "vxlan_id": tenant["vxlan_id"],
+            "subnet": tenant["subnet"],
+            "ip_range": ip_range,
+            "gateway": gateway,
+            "peers": [n["private_ip"] for n in nodes if n["node_id"] != node["node_id"]],
+        }
+        try:
+            r = httpx.put(
+                f"http://{node['private_ip']}:{AGENT_PORT}/networks/{tenant_id}",
+                json=spec, headers={"X-Agent-Token": AGENT_TOKEN}, timeout=30,
+            )
+            r.raise_for_status()
+            results[node["node_id"]] = r.json()["changes"]
+        except httpx.HTTPError as e:
+            results[node["node_id"]] = f"FAILED: {e}"
+    return {**tenant, "nodes": results}
+
+
+@app.get("/tenants")
+def list_tenants():
+    with db() as conn:
+        return conn.execute("SELECT tenant_id, vxlan_id, subnet FROM tenants ORDER BY vxlan_id").fetchall()
