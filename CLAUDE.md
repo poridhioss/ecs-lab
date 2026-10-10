@@ -275,6 +275,7 @@ What was built, and what the **next lab's title** adds.
 - **Time-sensitive observations must start in the same block as the action** (Lab 01). "Stop the agent" and "watch the registry" were separate blocks; on the real run the watch began ~65 s later and `node-02` was already `offline`, so the transition was never seen. Put the trigger and the watch loop in one block.
 - **`docker compose up` in a non-TTY ssh session prints hundreds of `Extracting` / `Pull complete` lines** on the first image pull (Lab 01). Harmless; tell students to expect it and show only the tail in the doc.
 - ✅ **Fixed private IPs work** (Lab 01): with `private_ip` set, agents registered as `10.0.1.21` / `10.0.1.22`.
+- **`curl -s ... | jq` turns a failed request into silence** (Lab 02). With `-s`, curl hides its own errors, and `jq` prints nothing for empty input, so `POST /tenants/alpha/network` showed no output at all and looked like an empty reply. Use `curl -sS` in every doc command (errors still print), and add a troubleshooting row for an empty `$CONTROL` (new terminal).
 
 ---
 

@@ -154,16 +154,6 @@ Each wrapped packet carries a 24-bit number, the **VNI** (VXLAN Network Identifi
 
 The wrapping adds 50 bytes to every packet. The VPC network between EC2 machines carries packets of up to 9001 bytes ("jumbo frames"), and containers send at most 1500, so there's plenty of room. You'll check this with a full-size ping.
 
-### Telling the tunnel where its peers are
-
-When a container sends a broadcast (like ARP), which nodes should the VXLAN interface send it to? Many setups use network multicast to find peers automatically, but AWS VPCs don't support multicast. Instead, the agent lists the peers itself, in the VXLAN interface's **forwarding database (FDB)**:
-
-```
-bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.22
-```
-
-The all-zeros address means "any frame I don't have a specific entry for (broadcasts, and unknown destinations): send a copy to `10.0.1.22`". With one such entry per peer node, every broadcast reaches every node. The interface is created with `nolearning`, so it never adds entries on its own: the control plane, which knows all nodes, is the only source of truth.
-
 ### Who gets which IP address
 
 This lab has two separate sets of IP addresses, and it's easy to mix them up.
@@ -232,6 +222,36 @@ Putting it together, this is what the control plane gives each node:
 
 This design rests on two assumptions, both true in this course: there are exactly **two** nodes (a third would need the subnets split into quarters), and each tenant needs **one** `/24` (at most 256 addresses across the cluster).
 
+### Telling the tunnel where its peers are
+
+The tunnel wraps a frame and sends it to *another node*. But which node? That's what the tunnel's **peers** and its **FDB** are for.
+
+**A peer** is another node that also carries the tenant's network: the place the tunnel leads to. With two nodes, each node has exactly one peer, named by its VPC address. `node-01`'s peer is `node-02` at `10.0.1.22`, and `node-02`'s peer is `node-01` at `10.0.1.21`.
+
+**The FDB** (forwarding database) is a lookup table that answers: "a frame for this hardware (MAC) address, where do I send it?". Every switch keeps one; on physical switches it's often called the MAC address table. It isn't a file, and it isn't in Docker or in Postgres: it's a table in the **Linux kernel's memory** on each node, attached to a network device. That's also why it's gone after a reboot. Each node has two FDBs that matter here:
+
+- **`br-alpha`'s FDB** answers "this MAC is behind which port of the switch?" (a container's port, or the `vxlan100` port). The bridge fills it in by itself as frames pass through.
+- **`vxlan100`'s FDB** answers "this MAC is on which *node*: to which node address should I send the wrapped packet?". This is the one the agent edits.
+
+You can read and change it with the `bridge` command: `bridge fdb show dev vxlan100` lists the entries, and `bridge fdb append` / `bridge fdb del` add and remove them. The agent adds one entry per peer:
+
+```
+bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.22
+```
+
+A normal FDB entry names one MAC address. The **all-zeros** address is a **catch-all**: "any frame I have no specific entry for, send to `10.0.1.22`". The tunnel is created with `nolearning`, which means it never adds specific entries on its own, so the catch-all handles every frame. With more nodes there would be one catch-all per peer, and the tunnel would send a copy to each of them. Many VXLAN setups find their peers automatically using network multicast, but AWS VPCs don't support multicast. That's why the control plane, which knows every node's address, tells each agent its peers.
+
+**Following one ping** from `alpha-1` (`10.10.1.10`, on node-01) to `alpha-2` (`10.10.1.140`, on node-02):
+
+1. `alpha-1` doesn't know `alpha-2`'s MAC address yet, so it broadcasts to its switch: "who has `10.10.1.140`?" (an ARP request).
+2. `br-alpha` on node-01 sends the broadcast out of all its ports, including `vxlan100`.
+3. `vxlan100` looks in its FDB, finds no specific entry, and uses the catch-all `dst 10.0.1.22`. It wraps the frame in a UDP packet tagged VNI 100 and sends it from `10.0.1.21` to `10.0.1.22`, port 4789.
+4. node-02 receives the packet, sees VNI 100, and passes it to its own `vxlan100`, which unwraps it and hands the original frame to `br-alpha`. `alpha-2` hears the question and replies with its MAC address.
+5. The reply comes back the same way, through node-02's catch-all `dst 10.0.1.21`.
+6. Now `alpha-1` sends the ping itself, to `alpha-2`'s MAC address. Again there's no specific entry, so it goes through the catch-all to node-02.
+
+Without the catch-all on node-01, step 3 has nowhere to send the frame and the ping dies. You'll cause exactly that in the break-it exercise.
+
 ### Three layers of isolation
 
 How do we know `beta` can never reach `alpha`?
@@ -254,7 +274,7 @@ The control plane talks to agents the second way. `PUT /networks/alpha` doesn't 
 | Docker network `alpha` exists? | no → create it | yes → skip | yes → skip |
 | `vxlan100` exists? | no → create it | yes → skip | yes → skip |
 | Plug `vxlan100` into `br-alpha`, switch it on | do it | do it (harmless) | do it (harmless) |
-| Peer `10.0.1.22` in the FDB? | no → add it | yes → skip | **no → add it** |
+| Catch-all entry for peer node-02 (`10.0.1.22`) in `vxlan100`'s FDB? | no → add it | yes → skip | **no → add it** |
 | The agent replies with these `changes` | 3 items | `[]` | `["added peer 10.0.1.22"]` |
 
 Without the checks, repeating a request would break things: `ip link add vxlan100` fails with `File exists`, Docker refuses to create a second network named `alpha`, and a second FDB entry for the same peer makes every broadcast go to that peer twice.
@@ -620,8 +640,10 @@ LISTEN 0      2048         0.0.0.0:5050      0.0.0.0:*    users:(("python",pid=4
 
 **workspace**
 ```bash
-curl -s -X POST http://$CONTROL:8000/tenants/alpha/network | jq
+curl -sS -X POST http://$CONTROL:8000/tenants/alpha/network | jq
 ```
+
+`-s` hides curl's progress bar, and `-S` still shows an error if curl can't connect. Without `-S`, a failed connection prints nothing at all, which is easy to mistake for an empty reply. If you see `curl: (3) URL rejected` or `Could not resolve host`, `$CONTROL` is empty: you're in a new terminal, so set the variables again (see the end of **Catch-up**).
 
 <!-- UNTESTED -->
 ```json
@@ -648,7 +670,7 @@ Each node built its own half and points at the other. Now `beta`:
 
 **workspace**
 ```bash
-curl -s -X POST http://$CONTROL:8000/tenants/beta/network | jq -c '{tenant_id, vxlan_id, subnet}'
+curl -sS -X POST http://$CONTROL:8000/tenants/beta/network | jq -c '{tenant_id, vxlan_id, subnet}'
 ```
 
 `jq -c '{tenant_id, vxlan_id, subnet}'` picks out three fields and prints them on one line.
@@ -662,7 +684,7 @@ Now ask for `alpha` again:
 
 **workspace**
 ```bash
-curl -s -X POST http://$CONTROL:8000/tenants/alpha/network | jq -c
+curl -sS -X POST http://$CONTROL:8000/tenants/alpha/network | jq -c
 ```
 
 <!-- UNTESTED -->
@@ -720,7 +742,8 @@ ssh node-01 'bridge fdb show dev vxlan100'
 
 <!-- UNTESTED -->
 ```
-... dev vxlan100 master br-alpha permanent
+fe:17:2d:6a:83:55 vlan 1 master br-alpha permanent
+fe:17:2d:6a:83:55 master br-alpha permanent
 00:00:00:00:00:00 dst 10.0.1.22 self permanent
 ```
 
@@ -850,7 +873,7 @@ Now repair it the way the platform would: by asking the control plane for the al
 
 **workspace**
 ```bash
-curl -s -X POST http://$CONTROL:8000/tenants/alpha/network | jq -c .nodes
+curl -sS -X POST http://$CONTROL:8000/tenants/alpha/network | jq -c .nodes
 ssh node-01 'docker exec alpha-1 ping -c 2 10.10.1.140'
 ```
 
@@ -891,7 +914,7 @@ alpha-2 -> 10.10.2.10: blocked (expected blocked)
 
 Every line must match its expectation. You're done when:
 
-- `GET /tenants` lists `alpha` (VXLAN 100, `10.10.1.0/24`) and `beta` (VXLAN 200, `10.10.2.0/24`): `curl -s http://$CONTROL:8000/tenants | jq -c`;
+- `GET /tenants` lists `alpha` (VXLAN 100, `10.10.1.0/24`) and `beta` (VXLAN 200, `10.10.2.0/24`): `curl -sS http://$CONTROL:8000/tenants | jq -c`;
 - both nodes have `br-alpha`, `br-beta`, `vxlan100` and `vxlan200`;
 - same-tenant containers reach each other across nodes, including full-size packets;
 - different tenants can't reach each other, on the same node or across nodes.
@@ -900,10 +923,11 @@ Every line must match its expectation. You're done when:
 
 | Symptom | Cause and fix |
 |---|---|
+| A `curl` command prints nothing, or `URL rejected` / `Could not resolve host` | `$CONTROL` is empty because you're in a new terminal. From `~/code/ecs-lab`, rerun the `CONTROL=` and `TOKEN=` lines from the end of **Catch-up**. |
 | A node in the `POST` response shows `FAILED: ... ConnectError` | The agent's API isn't running on that node. Check `ssh node-01 'journalctl -u agent -n 30 --no-pager'`. Typical causes: `network.py` missing or misnamed (`ModuleNotFoundError: No module named 'network'`), or a typo in `agent.py`. Fix, then `bash scripts/push.sh agent`. |
 | A node shows `FAILED: ... 500 Internal Server Error` | Network setup itself failed on that node. The agent log shows which command and why. |
 | `POST` returns `{"detail":"tenant_id: lowercase letters and digits, max 12"}` | Tenant names must start with a letter, use only lowercase letters and digits, and be at most 12 characters (`br-` + name must fit Linux's 15-character interface name limit). |
-| A node is missing from the `nodes` list | It wasn't `online` when you sent the request. Check `curl -s http://$CONTROL:8000/agents | jq`, then send the `POST` again. |
+| A node is missing from the `nodes` list | It wasn't `online` when you sent the request. Check `curl -sS http://$CONTROL:8000/agents | jq`, then send the `POST` again. |
 | `docker run` fails with `no configured subnet or ip-range contain the IP address` | The `--ip` isn't in that node's half: node-01 owns `.0`–`.127`, node-02 owns `.128`–`.255`. |
 | Cross-node ping fails, same-node ping works | Check `ssh node-01 'bridge fdb show dev vxlan100'` for the `dst` entry, and `ip -d link show vxlan100` for `master br-alpha`. Re-sending the `POST` repairs both. |
 | Small pings work, `-s 1472` pings fail | The tunnel can't carry full-size frames. On EC2 the NIC MTU is 9001, so check `ip link show ens5` on both nodes. |
