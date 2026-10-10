@@ -39,4 +39,17 @@ for node in node-01 node-02; do
   done
 done
 
+echo "== container lifecycle (a 60-second test container) =="
+ID=$(curl -sf -X POST "http://$CONTROL:8000/containers" -H "Content-Type: application/json" \
+  -d '{"tenant_id": "alpha", "image": "busybox:1.37", "command": ["sleep", "3600"], "ttl_seconds": 60}' \
+  | jq -r .container_id)
+[ -n "$ID" ] && [ "$ID" != null ] || fail "POST /containers failed"
+for i in $(seq 45); do
+  STATUS=$(curl -sf "http://$CONTROL:8000/containers" | jq -r --arg id "$ID" '.[] | select(.container_id == $id) | .status')
+  [ "$STATUS" = running ] && break
+  sleep 2
+done
+[ "$STATUS" = running ] || fail "test container $ID is '$STATUS', not running"
+echo "ok: $ID running (its workflow removes it after 60s)"
+
 echo "ALL CHECKS PASSED"

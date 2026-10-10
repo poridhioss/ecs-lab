@@ -9,13 +9,17 @@ import logging
 import os
 import secrets
 import socket
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
+from temporalio.client import Client
+from temporalio.worker import Worker
 
+import activities
 import network
 
 NODE_ID = os.environ["NODE_ID"]                          # e.g. node-01, set by Terraform
@@ -122,12 +126,32 @@ async def heartbeats():
                 log.warning("heartbeat failed: %s", e)
 
 
+async def temporal_worker():
+    """Run container operations that the lifecycle workflows send to this node's task queue."""
+    while True:
+        try:
+            client = await Client.connect(f"{os.environ['CONTROL_IP']}:7233")
+            break
+        except Exception as e:
+            log.warning("Temporal not reachable (%s), retrying in 5s", e)
+            await asyncio.sleep(5)
+    worker = Worker(
+        client,
+        task_queue=NODE_ID,  # the registered node ID, e.g. node-01: never the hostname
+        activities=[activities.launch_container, activities.check_container, activities.stop_container],
+        activity_executor=ThreadPoolExecutor(max_workers=8),  # the activities are plain (blocking) functions
+    )
+    log.info("Temporal worker polling task queue %s", NODE_ID)
+    await worker.run()
+
+
 async def main():
-    # Two jobs in one process: heartbeats in the background, the API in front.
-    beating = asyncio.create_task(heartbeats())
+    # Three jobs in one process: heartbeats and the Temporal worker in the background, the API in front.
+    background = [asyncio.create_task(heartbeats()), asyncio.create_task(temporal_worker())]
     server = uvicorn.Server(uvicorn.Config(api, host="0.0.0.0", port=AGENT_PORT, log_level="warning"))
     await server.serve()  # runs until the service is stopped
-    beating.cancel()
+    for task in background:
+        task.cancel()
 
 
 if __name__ == "__main__":

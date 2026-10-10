@@ -15,7 +15,12 @@ import httpx
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException
 from psycopg.rows import dict_row
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from temporalio import activity
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+from workflows import ContainerLifecycleWorkflow, ContainerSpec
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://ecs:ecs@localhost:5432/ecs")
 AGENT_TOKEN = os.environ["AGENT_TOKEN"]
@@ -44,6 +49,21 @@ CREATE TABLE IF NOT EXISTS tenants (
     vxlan_id   INTEGER NOT NULL UNIQUE,
     subnet     TEXT NOT NULL UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS containers (
+    container_id TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL REFERENCES tenants (tenant_id),
+    node_id      TEXT NOT NULL,
+    image        TEXT NOT NULL,
+    cpu          REAL NOT NULL,
+    mem_mb       INTEGER NOT NULL,
+    ttl_seconds  INTEGER NOT NULL,
+    status       TEXT NOT NULL,      -- pending, running, failed, expired
+    ip           TEXT,
+    reason       TEXT,               -- why it ended
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -76,13 +96,27 @@ async def offline_checker():
         await asyncio.sleep(5)
 
 
+TEMPORAL_ADDRESS = "localhost:7233"   # Temporal runs on this machine (Docker Compose)
+LIFECYCLE_QUEUE = "lifecycle"         # the task queue our workflows run on
+
+
 @asynccontextmanager
 async def lifespan(app):
     with db() as conn:
         conn.execute(SCHEMA)
-    task = asyncio.create_task(offline_checker())
+    # If Temporal isn't up yet, this raises, the service exits, and systemd restarts it.
+    app.state.temporal = await Client.connect(TEMPORAL_ADDRESS)
+    # This worker runs the lifecycle workflows, plus the one activity that writes to our database.
+    worker = Worker(
+        app.state.temporal,
+        task_queue=LIFECYCLE_QUEUE,
+        workflows=[ContainerLifecycleWorkflow],
+        activities=[record_status],
+    )
+    tasks = [asyncio.create_task(offline_checker()), asyncio.create_task(worker.run())]
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
 
 
 app = FastAPI(title="ECS Lab Control Plane", lifespan=lifespan)
@@ -232,3 +266,89 @@ def create_tenant_network(tenant_id: str):
 def list_tenants():
     with db() as conn:
         return conn.execute("SELECT tenant_id, vxlan_id, subnet FROM tenants ORDER BY vxlan_id").fetchall()
+
+
+# ---------- containers ----------
+
+class ContainerRequest(BaseModel):
+    tenant_id: str
+    image: str
+    command: list[str] | None = None              # None = the image's default command
+    cpu: float = Field(0.25, gt=0, le=2)          # CPUs
+    mem_mb: int = Field(64, ge=6, le=2048)        # memory limit, MiB
+    ttl_seconds: int = Field(300, gt=0, le=3600)  # stop the container after this long
+
+
+def schedule(cpu, mem_mb):
+    """The online node with the most free memory that still fits the request."""
+    with db() as conn:
+        candidates = conn.execute(
+            """SELECT node_id FROM agents
+               WHERE status = 'online' AND cpu_free >= %s AND mem_free >= %s
+               ORDER BY mem_free DESC""",
+            (cpu, mem_mb * 1024 * 1024),
+        ).fetchall()
+    candidates = [c["node_id"] for c in candidates if c["node_id"] in NODE_SLOTS]
+    if not candidates:
+        raise HTTPException(status_code=409, detail="no online node has enough free CPU and memory")
+    return candidates[0]
+
+
+def prepare_container(req):
+    """Check the tenant, pick a node, and record the container as pending."""
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM tenants WHERE tenant_id = %s", (req.tenant_id,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"tenant {req.tenant_id} has no network yet")
+    spec = ContainerSpec(
+        container_id=f"{req.tenant_id}-{secrets.token_hex(4)}",  # e.g. alpha-3f9a1c2e
+        node_id=schedule(req.cpu, req.mem_mb),
+        **req.model_dump(),
+    )
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO containers (container_id, tenant_id, node_id, image, cpu, mem_mb, ttl_seconds, status)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')""",
+            (spec.container_id, spec.tenant_id, spec.node_id, spec.image, spec.cpu, spec.mem_mb, spec.ttl_seconds),
+        )
+    return spec
+
+
+@app.post("/containers", status_code=201)
+async def create_container(req: ContainerRequest):
+    spec = await asyncio.to_thread(prepare_container, req)  # database work, off the event loop
+    workflow_id = f"container-{spec.container_id}"
+    # Start the lifecycle and return at once: the workflow carries on without us.
+    await app.state.temporal.start_workflow(
+        ContainerLifecycleWorkflow.run, spec, id=workflow_id, task_queue=LIFECYCLE_QUEUE,
+    )
+    log.info("container %s scheduled on %s (workflow %s)", spec.container_id, spec.node_id, workflow_id)
+    return {"container_id": spec.container_id, "node_id": spec.node_id, "status": "pending", "workflow_id": workflow_id}
+
+
+@app.get("/containers")
+def list_containers(tenant_id: str | None = None):
+    with db() as conn:
+        return conn.execute(
+            """SELECT container_id, tenant_id, node_id, image, status, ip, reason, created_at, updated_at
+               FROM containers
+               WHERE %(tenant_id)s::text IS NULL OR tenant_id = %(tenant_id)s
+               ORDER BY created_at""",
+            {"tenant_id": tenant_id},
+        ).fetchall()
+
+
+@activity.defn
+async def record_status(update: dict) -> None:
+    """Run by the lifecycle workflow (on control-01) to keep the containers table current."""
+    def write():
+        with db() as conn:
+            conn.execute(
+                """UPDATE containers
+                   SET status = %(status)s, ip = COALESCE(%(ip)s::text, ip),
+                       reason = %(reason)s, updated_at = now()
+                   WHERE container_id = %(container_id)s""",
+                update,
+            )
+    await asyncio.to_thread(write)
+    log.info("container %s is %s%s", update["container_id"], update["status"],
+             f": {update['reason']}" if update["reason"] else "")

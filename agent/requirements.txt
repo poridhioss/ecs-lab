@@ -3,3 +3,4 @@ psutil==7.2.2
 fastapi==0.142.2
 uvicorn==0.54.0
 docker==7.2.0
+temporalio==1.34.0
