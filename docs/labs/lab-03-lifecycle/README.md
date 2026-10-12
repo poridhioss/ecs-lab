@@ -130,6 +130,8 @@ The obvious design is a background task in the control plane: for each container
 
 Temporal handles all of this for you. Its server records each step of every workflow in its own database. When a worker restarts, Temporal hands it the recorded history, and the workflow continues as if nothing happened.
 
+![What a restart does: a loop in the control plane vs a Temporal workflow](images/high/lab3-loop-vs-temporal.png)
+
 ### Temporal's building blocks
 
 | Piece | What it is | In this lab |
@@ -141,6 +143,8 @@ Temporal handles all of this for you. Its server records each step of every work
 | **Worker** | A process that listens on a task queue and runs the workflows or activities registered with it. | One inside the control plane (queue `lifecycle`), one inside each agent (queue = its node ID). |
 
 The task queue is how work reaches the **right machine**. A container scheduled on `node-02` must be started by `node-02`'s Docker, so the workflow sends `launch_container` to the `node-02` queue, where only `node-02`'s agent is listening. The queue is named after the **registered node ID**, not the machine's hostname, so it matches what the control plane's scheduler picked.
+
+![Task queues: how work reaches the right machine](images/high/lab3-task-queues-corrected.png)
 
 ### Durable timers and replay
 
@@ -156,6 +160,8 @@ Replay only works if the workflow makes the **same decisions** every time it run
 
 Temporal checks this for you: it runs workflow code in a sandbox that blocks most of these mistakes.
 
+![Durable timers and replay: how a restarted worker finds its place](images/high/lab3-durable-timers-and-replay.png)
+
 ### Timeouts that detect a dead node
 
 Every activity call needs a timeout, and the kind matters:
@@ -165,9 +171,13 @@ Every activity call needs a timeout, and the kind matters:
 
 If `node-02` is dead, nothing ever picks up work from the `node-02` queue. A `start_to_close` timeout would never even start counting. A `schedule_to_close` timeout of 10 seconds expires anyway, and the health check fails. That's why the workflow uses `schedule_to_close` for everything it sends to a node.
 
+![Why schedule_to_close catches a dead node](images/medium/lab3-timeouts-dead-node.png)
+
 ### Scheduling: where should a container run?
 
 The scheduler uses the free capacity each agent reports in its heartbeats: of the online nodes with enough free CPU and memory, it picks the one with the **most free memory**. This spreads containers across nodes. It's deliberately simple. One flaw to know about: heartbeats arrive every 10 seconds, so two containers requested within a few seconds of each other are judged on the same, slightly stale numbers.
+
+![How the scheduler picks a node](images/medium/lab3-scheduling.png)
 
 ### How long can a workflow live?
 
@@ -346,6 +356,8 @@ Read it as the plan it is:
 
 Notice what isn't here: no retry loops, no saving progress, no recovery code. Temporal takes care of all that.
 
+![The container lifecycle workflow, decision by decision](images/high/lab3-workflow-lifecycle.png)
+
 **Part 3: the helpers.**
 
 ```python
@@ -496,6 +508,8 @@ async def record_status(update: dict) -> None:
 - **`POST /containers`** is `async` because starting a workflow is an async Temporal call. The database part runs on a thread (`asyncio.to_thread`) so it doesn't block the event loop, which the Temporal worker shares. `start_workflow` returns as soon as Temporal has recorded the workflow: the response says `pending` straight away, and the workflow takes it from there. The workflow ID contains the container ID, so you can find it in the Temporal UI.
 - **`GET /containers`** lists containers, optionally only one tenant's (`?tenant_id=alpha`). The `%(tenant_id)s::text IS NULL OR ...` trick means "no filter when no tenant is given".
 - **`record_status`** is an activity like any other, but it lives in the control plane because it needs the database. `COALESCE(new_ip, ip)` keeps the IP recorded at launch when later updates don't include one.
+
+![From POST /containers to a running container](images/medium/lab3-post-containers.png)
 
 Save the file.
 
@@ -753,6 +767,8 @@ expired  TTL of 120s reached
 
 The control plane process, including the worker running the workflow, was killed and started again. The workflow didn't start over, didn't launch a second container, and still expired the container on time. While the control plane was down, its timers kept firing on the Temporal server. When the new worker started, Temporal replayed the workflow's history to it, and it carried on.
 
+![What happened during the control-plane restart](images/medium/lab3-restart-mid-life.png)
+
 ## Break it on purpose
 
 Kill a container behind the platform's back, and watch the workflow notice. This block launches a container with a 5-minute TTL, waits until it's `running`, kills it directly with Docker on its node, and watches:
@@ -786,6 +802,8 @@ failed  3 failed health checks in a row
 For up to 45 seconds the status still says `running`: the workflow only learns about the kill at its next health check, and it waits for three failed checks in a row before giving up. Then it records `failed` with the reason, and removes the dead container. In the Temporal UI, this workflow's history shows three `check_container` results with `"healthy": false`.
 
 Three checks at 15-second intervals is a trade-off: a container is declared dead 30 to 45 seconds after it dies, but a single slow check doesn't kill a healthy container. Change `CHECK_EVERY` or `MAX_FAILED_CHECKS` in `workflows.py` to tune it.
+
+![From docker kill to failed](images/medium/lab3-failure-detection.png)
 
 ## Verification
 

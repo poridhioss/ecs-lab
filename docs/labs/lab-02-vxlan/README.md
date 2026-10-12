@@ -124,18 +124,7 @@ Two containers in the same subnet (say `10.10.1.10` and `10.10.1.140`) don't use
 
 On Linux, a **bridge** is a virtual switch. A Docker network of type `bridge` is exactly that: a bridge, a subnet, and a gateway address on the bridge. But a bridge lives on one machine. Containers on `node-01`'s bridge can't send ARP broadcasts to containers on `node-02`.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-bridge-is-one-machine.png` (priority: high)
->
-> - **Title:** A bridge is a switch, but only on one machine
-> - **Type:** two machines side by side, each with a virtual switch inside
-> - **Show:**
->   - Left, `node-01`: a box `br-alpha` drawn as a switch with ports; two containers `alpha-1` (`10.10.1.10`) and `alpha-3` (`10.10.1.11`) plugged into its ports with short cables labeled *veth*
->   - Right, `node-02`: its own separate `br-alpha` switch with `alpha-2` (`10.10.1.140`) plugged in
->   - From `alpha-1`, a broadcast drawn as ripples / a speech bubble: *"who has 10.10.1.140?" (ARP)*. The ripples reach every port of node-01's switch, including `alpha-3`
->   - The ripples stop at node-01's edge: a red wall labeled *the bridge ends here*; `alpha-2` on node-02 never hears the question (show it with a red ✗)
->   - Small labels: *same subnet 10.10.1.0/24 on both machines, but two separate switches*
-> - **Takeaway (caption under the image):** Containers in one subnet find each other by broadcasting on their switch, and a Linux bridge only reaches the containers on its own machine.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![A bridge is a switch, but only on one machine](images/high/lab2-bridge-is-one-machine.png)
 
 ### VXLAN: a cable inside the network
 
@@ -145,18 +134,7 @@ Each wrapped packet carries a 24-bit number, the **VNI** (VXLAN Network Identifi
 
 The wrapping adds 50 bytes to every packet. The VPC network between EC2 machines carries packets of up to 9001 bytes ("jumbo frames"), and containers send at most 1500, so there's plenty of room. You'll check this with a full-size ping.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-vxlan-wrapping.png` (priority: high)
->
-> - **Title:** What VXLAN does to one frame
-> - **Type:** packet anatomy (nested envelopes), with a small left-to-right strip underneath
-> - **Show:**
->   - Main picture: the **original frame** from `alpha-1`, drawn as an inner envelope with fields: `src MAC alpha-1`, `dst MAC alpha-2`, `src IP 10.10.1.10`, `dst IP 10.10.1.140`, `ping (ICMP) data`; labeled *up to 1500 bytes, what the container sent*
->   - Wrapped around it, an outer envelope in a different color with four headers, left to right: `outer Ethernet` · `outer IP 10.0.1.21 → 10.0.1.22` (the node addresses) · `UDP, destination port 4789` · `VXLAN header: VNI 100`; labeled *+50 bytes added by vxlan100*
->   - Size bar under it: inner frame 1500 + 50 = 1550 bytes, compared with a longer bar *VPC limit (MTU) 9001 bytes*: plenty of room
->   - Strip underneath: `alpha-1` → `br-alpha` → `vxlan100` (**wrap**) → `ens5` on node-01 → VPC network → `ens5` on node-02 → `vxlan100` (**unwrap**, sees VNI 100) → `br-alpha` → `alpha-2`
->   - A second, faded envelope labeled `VNI 200` (beta) going through the same pipe, with a note: *same machines, same cable, different number: never mixed*
-> - **Takeaway (caption under the image):** VXLAN puts a whole Ethernet frame inside an ordinary UDP packet between the two nodes, labeled with the tenant's number.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![What VXLAN does to one frame](images/high/lab2-vxlan-wrapping.png)
 
 ### Who gets which IP address
 
@@ -175,34 +153,9 @@ This lab has two separate sets of IP addresses, and it's easy to mix them up.
 
 The two look alike (`10.0.1.` vs `10.10.1.`), so read carefully: everything in the rest of this section is about **tenant** subnets.
 
-Here is how the two sets fit together for tenant `alpha`:
+Here is how the two sets fit together, for both tenants:
 
-```
-        node-01  (node address 10.0.1.21)               node-02  (node address 10.0.1.22)
- ┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
- │  alpha-1                             │        │                             alpha-2  │
- │  10.10.1.10                          │        │                         10.10.1.140  │
- │     │                                │        │                                │     │
- │  br-alpha  (bridge IP 10.10.1.1)     │        │     (bridge IP 10.10.1.129)  br-alpha│
- │     │                                │        │                                │     │
- │  vxlan100 ─────── ens5 ══════════ tunnel, UDP 4789 ══════════ ens5 ─────── vxlan100   │
- └──────────────────────────────────────┘        └──────────────────────────────────────┘
-          one switch, one subnet for alpha: 10.10.1.0/24, spread over both nodes
-```
-
-> **DIAGRAM PLACEHOLDER** `images/lab2-two-layers-of-addresses.png` (priority: high)
->
-> - **Title:** Two layers of addresses: the real network and the tenant networks on top of it
-> - **Type:** two stacked layers (a "layer cake"), seen at a slight angle
-> - **Show:**
->   - Bottom layer, labeled *underlay: the VPC subnet 10.0.1.0/24 (real machines)*: `node-01` at `10.0.1.21` and `node-02` at `10.0.1.22`, joined by the VPC network; a dashed blue pipe between them labeled *VXLAN tunnel, UDP 4789*
->   - Top layer, labeled *overlay: tenant networks (exist only on the bridges and inside the tunnel)*: a green strip *alpha · 10.10.1.0/24 · VNI 100* that spans **both** nodes, with `alpha-1 10.10.1.10` above node-01 and `alpha-2 10.10.1.140` above node-02, plus the bridge addresses `10.10.1.1` (node-01) and `10.10.1.129` (node-02)
->   - A second, orange strip *beta · 10.10.2.0/24 · VNI 200* on the same layer, also spanning both nodes, visibly separate from alpha's strip
->   - Vertical dotted lines connecting each tenant strip down to both nodes, labeled *carried through the tunnel*
->   - Side note: *AWS only ever sees the bottom layer*
-> - **Takeaway (caption under the image):** The VPC carries the machines' own addresses; each tenant gets its own network on top, spread over both machines.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
-> - **Note for the author:** this image replaces the text drawing (the code block) just above this marker. When you add the image, delete that code block too.
+![Two layers of addresses: real network and tenant overlay](images/high/lab2-two-layers-of-addresses.png)
 
 **Why both nodes share one subnet.** A **subnet** is a block of addresses that all sit on the same local network. `10.10.1.0/24` means "every address that starts with `10.10.1.`", which is 256 addresses, `10.10.1.0` to `10.10.1.255`. (The `/24` says the first 24 bits, the first three numbers, are fixed.) The tunnel joins `alpha`'s two bridges into **one** switch, so all of `alpha`'s containers are on one local network, on whichever node they run. One local network means one subnet. That's what lets `alpha-1` reach `alpha-2` directly, as described in "Same subnet, same switch" above.
 
@@ -240,18 +193,7 @@ Putting it together, this is what the control plane gives each node:
 
 This design rests on two assumptions, both true in this course: there are exactly **two** nodes (a third would need the subnets split into quarters), and each tenant needs **one** `/24` (at most 256 addresses across the cluster).
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-subnet-split.png` (priority: high)
->
-> - **Title:** Splitting one tenant subnet between two nodes
-> - **Type:** two stacked panels: the problem, then the fix
-> - **Show:**
->   - Top panel *without a split (the problem)*: a number line `10.10.1.0` to `10.10.1.255`. node-01's Docker and node-02's Docker each point at the same address `10.10.1.2`, each thinking *"free, I'll take it"*; red ✗ and the label *two containers, one address: packets go to the wrong one*
->   - Bottom panel *with a split (the fix)*: the same number line cut in the middle. Left half, colored for node-01: `10.10.1.0/25` (`.0` – `.127`), with markers for the gateway `.1` and the container `alpha-1 .10`. Right half, colored for node-02: `10.10.1.128/25` (`.128` – `.255`), with the gateway `.129` and `alpha-2 .140`
->   - Under each half, its node's name and the words *Docker on this node only picks from here*
->   - A thinner second number line for beta in orange: `10.10.2.0/25` (gateway `.1`) | `10.10.2.128/25` (gateway `.129`)
->   - Caption tags: *each node: its own half (IP range) and its own gateway*
-> - **Takeaway (caption under the image):** Each node owns one half of every tenant subnet, with its own gateway, so the two nodes can never hand out the same address.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![Splitting one tenant subnet between two nodes](images/high/lab2-subnet-split.png)
 
 ### Telling the tunnel where its peers are
 
@@ -283,17 +225,7 @@ A normal FDB entry names one MAC address. The **all-zeros** address is a **catch
 
 Without the catch-all on node-01, step 3 has nowhere to send the frame and the ping dies. You'll cause exactly that in the break-it exercise.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-one-ping-step-by-step.png` (priority: high)
->
-> - **Title:** Following one ping from alpha-1 to alpha-2
-> - **Type:** numbered path across two nodes (like a map with a route drawn on it)
-> - **Show:**
->   - Two node boxes side by side, each showing the chain container → `br-alpha` → `vxlan100` → `ens5`; node-01 at `10.0.1.21`, node-02 at `10.0.1.22`
->   - Next to node-01's `vxlan100`, its FDB drawn as a small table with one row: `00:00:00:00:00:00 → dst 10.0.1.22` (labeled *catch-all*)
->   - Numbered route: ① `alpha-1` broadcasts *"who has 10.10.1.140?"* ② `br-alpha` floods it to all its ports, including `vxlan100` ③ `vxlan100` looks up its FDB, finds only the catch-all, wraps the frame with VNI 100 and sends it to `10.0.1.22:4789` ④ node-02's `vxlan100` unwraps it and hands it to its `br-alpha`; `alpha-2` replies *"10.10.1.140 is at MAC …"* ⑤ the reply comes back the same way, through node-02's catch-all `dst 10.0.1.21` ⑥ `alpha-1` sends the actual ping
->   - A small red inset: *without the catch-all entry, step ③ has nowhere to send the frame: the ping dies* (this is the break-it exercise)
-> - **Takeaway (caption under the image):** The tunnel's address book has one catch-all entry per peer, and that entry is what carries every frame to the other node.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![Following one ping from alpha-1 to alpha-2](images/high/lab2-one-ping-step-by-step.png)
 
 ### Three layers of isolation
 
@@ -303,17 +235,7 @@ How do we know `beta` can never reach `alpha`?
 2. **Separate tunnels.** VNI 100 traffic only ever reaches `br-alpha` bridges.
 3. **No routing between tenants.** A `beta` container could still try sending to `10.10.1.140` through its gateway, which is the node itself, and the node *does* have a route to `10.10.1.0/24` (via `br-alpha`). What stops it is Docker: it installs firewall rules that drop traffic between different Docker networks. Without that rule, the node would happily route `beta`'s packets into `alpha`'s network.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-isolation-layers.png` (priority: medium)
->
-> - **Title:** Why beta can't reach alpha, even on the same machine
-> - **Type:** one node (node-01) shown in detail, with two failed attempts drawn as routes
-> - **Show:**
->   - Inside node-01: `br-alpha` (green) with `alpha-1` (`10.10.1.10`), and `br-beta` (orange) with `beta-1` (`10.10.2.10`); `vxlan100` plugged only into `br-alpha`, `vxlan200` only into `br-beta`
->   - Attempt 1, `beta-1` → `alpha-1` on the same node: `10.10.1.10` isn't in beta's subnet, so the packet goes to beta's gateway (`10.10.2.1`, the node itself); the node's routing table says *10.10.1.0/24 is via br-alpha*, but a red firewall shield labeled *Docker rule: drop traffic between different Docker networks* stops it
->   - Attempt 2, `beta-1` → `alpha-2` on node-02: same path to the gateway, same firewall shield, stopped before it could reach `br-alpha` or `vxlan100`
->   - Three numbered badges for the three layers: ① separate switches (`br-alpha` ≠ `br-beta`) ② separate tunnels (VNI 100 only reaches `br-alpha`) ③ no routing between tenants (the firewall shield)
-> - **Takeaway (caption under the image):** Separate switches and separate tunnels keep the tenants apart, and Docker's firewall stops the node from routing between them.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![Why beta can't reach alpha, even on the same machine](images/medium/lab2-isolation-layers.png)
 
 ### Safe to repeat: describing the goal, not the steps
 
@@ -480,19 +402,7 @@ def list_tenants():
 
 For every online node, the control plane builds a **spec**: the tenant's VXLAN ID and subnet, this node's half and gateway, and the private IPs of all the *other* nodes (its peers). It sends the spec to the agent with `PUT /networks/alpha` on port 5050, using the same shared token the agents use. The response collects what each node changed, so you can see exactly what happened. A node that can't be reached shows `FAILED` instead of stopping the whole request.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-create-tenant-network.png` (priority: medium)
->
-> - **Title:** What happens on POST /tenants/alpha/network
-> - **Type:** sequence diagram with five lifelines: You (curl on the workspace), Control plane (control-01), Postgres, Agent on node-01 (:5050), Agent on node-02 (:5050)
-> - **Show:**
->   - You → Control plane: `POST /tenants/alpha/network`
->   - Control plane → Postgres: `allocate_tenant`: `INSERT ... ON CONFLICT (tenant_id) DO NOTHING`, then read back `alpha · VNI 100 · 10.10.1.0/24`
->   - Control plane → Postgres: list online agents → `node-01 10.0.1.21`, `node-02 10.0.1.22`
->   - Control plane → node-01: `PUT /networks/alpha` with header `X-Agent-Token` and spec `{vxlan_id: 100, subnet: 10.10.1.0/24, ip_range: 10.10.1.0/25, gateway: 10.10.1.1, peers: [10.0.1.22]}` → reply `changes: [created Docker network…, created vxlan100…, added peer 10.0.1.22]`
->   - Control plane → node-02: `PUT /networks/alpha`, spec `{… ip_range: 10.10.1.128/25, gateway: 10.10.1.129, peers: [10.0.1.21]}` → reply with its own `changes`
->   - Control plane → You: one combined response `{tenant_id: alpha, vxlan_id: 100, subnet: 10.10.1.0/24, nodes: {node-01: [...], node-02: [...]}}`
-> - **Takeaway (caption under the image):** The control plane decides the addresses once, then tells each node its own half, its gateway, and where its peer is.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![What happens on POST /tenants/alpha/network](images/medium/lab2-create-tenant-network.png)
 
 Save the file.
 
@@ -601,18 +511,7 @@ def setup_tenant_network(tenant_id, spec, nic):
 
 `bridge fdb show dev vxlan100` lists the existing entries, one per line, like `00:00:00:00:00:00 dst 10.0.1.22 self permanent`. The check looks for `dst 10.0.1.22 ` *with* the trailing space, so a peer `10.0.1.2` isn't mistaken for `10.0.1.22`. `setup_tenant_network` runs the three steps in order (the bridge must exist before the tunnel can be plugged into it) and returns the list of everything it changed. An empty list means the node was already correct.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-building-the-network-on-a-node.png` (priority: medium)
->
-> - **Title:** What setup_tenant_network builds on node-01
-> - **Type:** left: three numbered steps with their commands; right: the resulting devices, drawn as connected boxes
-> - **Show:**
->   - Step 1 `ensure_docker_network`: Docker network `alpha`, bridge name `br-alpha`, subnet `10.10.1.0/24`, IP range `10.10.1.0/25`, gateway `10.10.1.1`
->   - Step 2 `ensure_vxlan`: `ip link add vxlan100 type vxlan id 100 dstport 4789 dev ens5 nolearning`, then `ip link set vxlan100 master br-alpha` and `up`
->   - Step 3 `ensure_peers`: `bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.22`
->   - Right side, the result as a device chain: (future containers) — `br-alpha` (`10.10.1.1`) — `vxlan100` (VNI 100, with its FDB row `00:00… → 10.0.1.22`) — `ens5` (`10.0.1.21`) — *to node-02*
->   - Each step with a small *check first* tag: *exists? skip*
-> - **Takeaway (caption under the image):** Three steps, each checked before it acts: a bridge for the tenant, a tunnel plugged into it, and the tunnel's one catch-all entry.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
+![What setup_tenant_network builds on node-01](images/medium/lab2-building-the-network-on-a-node.png)
 
 Save the file.
 
