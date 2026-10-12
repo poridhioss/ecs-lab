@@ -111,13 +111,19 @@ A cluster has two kinds of work. Deciding *what* should run *where* is the job o
 
 A **heartbeat** repeats every few seconds: "I'm still here, and right now 1.7 CPUs and 3.1 GB are free." It answers *who is alive, and how busy*. Later, the scheduler will use this live free capacity to choose a machine for each new container.
 
+![Registration once, then a heartbeat every 10 seconds](images/high/lab1-register-heartbeat.png)
+
 ### Detecting dead machines
 
 A machine that crashes can't announce that it crashed. It simply goes quiet. So the control plane treats silence as the signal: if no heartbeat has arrived for **30 seconds** (three missed heartbeats), the agent is marked `offline`. One missed heartbeat could just be a slow network; three in a row almost certainly means trouble.
 
+![How silence turns into offline](images/high/lab1-offline-timeline.png)
+
 ### Authenticating machines
 
 Anyone who can reach port 8000 could register a fake node. So agent endpoints require a shared secret, the **agent token**, sent in an `X-Agent-Token` header. Agents are machines, not people, so they don't log in; they present the token. (People will authenticate differently, with single sign-on, in a later lab.) Terraform generates a fresh random token every time you create the cluster.
+
+![Where the agent token comes from, and how it is checked](images/medium/lab1-agent-token.png)
 
 ### Upsert: registering twice is fine
 
@@ -161,6 +167,8 @@ resource "aws_instance" "machine" {
 Without `private_ip`, AWS would pick any free address in the subnet. With it, AWS assigns exactly that address, or `terraform apply` fails with an error instead of quietly choosing another. These addresses are always free because every session starts with a brand-new, empty VPC. They are also all inside the subnet `10.0.1.0/24` and avoid the five addresses AWS reserves in every subnet (`.0` to `.3` and `.255`).
 
 Because the addresses are fixed, every machine knows where the control plane is (`10.0.1.10`) before any of them exist. Only the *public* IPs change each time you create the cluster.
+
+![The cluster's network, and the two addresses every machine has](images/high/lab1-network-address-corrected.png)
 
 Create it:
 
@@ -248,6 +256,8 @@ AGENT_TOKEN=RydWD0asm6YRSw4d...
 
 (Shortened here. Yours is a different random 32-character string, new every time you create the cluster.)
 
+![From terraform apply to a configured machine](images/medium/lab1-first-boot.png)
+
 The agent will read these three values: its own name, where the control plane is, and the secret token. Terraform filled in `CONTROL_IP` from the same `machines` map, so it always matches the address `control-01` really has. Check it:
 
 **workspace**
@@ -277,6 +287,8 @@ bash scripts/push.sh infra
 ```
 
 `push.sh infra` packs `infra/control/`, copies it over SSH to `/opt/ecs-lab/` on `control-01`, and runs its `install.sh` there. That runs `docker compose up -d --wait`: `-d` starts the containers in the background, and `--wait` blocks until they are running and Postgres reports healthy.
+
+![What scripts/push.sh does](images/high/lab1-push-deploy.png)
 
 The first time, Docker downloads the two images and prints many `Extracting` and `Pull complete` lines. That's normal. The end of the output looks like this:
 
@@ -487,6 +499,8 @@ Things to notice:
 - `register` is the upsert from the Concepts section. `EXCLUDED` means "the row you tried to insert". The response tells the agent how often to send heartbeats, so that setting lives in one place.
 - `heartbeat` returns `404` if the node isn't registered (for example, if the database was wiped). The agent will react by registering again.
 - `seconds_since_seen` is computed by Postgres, which makes the `offline` logic easy to watch.
+
+![Inside the control plane: request path and background checker](images/medium/lab1-control-plane-anatomy.png)
 
 Save the file.
 
@@ -712,6 +726,8 @@ if __name__ == "__main__":
 - The main loop sends a heartbeat every `interval` seconds (10, as the control plane said). A failed heartbeat is logged but doesn't stop the loop: the next one may well succeed.
 - A `404` means the control plane doesn't know us any more, so we register again. Together with the upsert, this makes the system heal itself after either side restarts.
 - The agent uses `asyncio` and `httpx`'s async client. That doesn't matter much yet, but in a later lab the agent also runs a Temporal worker in the same process, and both must share one event loop.
+
+![What the agent does, from start-up to forever](images/high/lab1-agent-flows.png)
 
 Save the file.
 
