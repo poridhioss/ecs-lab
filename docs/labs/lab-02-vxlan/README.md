@@ -262,18 +262,6 @@ A request that gives the same result however many times you send it is called **
 2. **Repairing.** In the break-it exercise you delete an FDB entry by hand, send the same request again, and watch the agent add back just that entry. A node reboot is similar: the Docker network survives a reboot, but `vxlan100` doesn't, and the same request re-creates only the tunnel.
 3. **Catching up.** The next lab starts on brand-new machines with an empty database, so there's no saved network to restore. Instead, its catch-up script sends the same two requests you send by hand in this lab, `POST /tenants/alpha/network` and `.../beta/network`. On empty nodes every check says "missing", so everything gets built again, by the same code. Allocation is idempotent too: `alpha` is created first, so it gets VXLAN 100 and `10.10.1.0/24` again.
 
-> **DIAGRAM PLACEHOLDER** `images/lab2-safe-to-repeat.png` (priority: low)
->
-> - **Title:** Same request, three situations
-> - **Type:** three columns, each showing the agent's checklist with ticks
-> - **Show:**
->   - Column *1st request (empty node)*: four checks, three of them with a green + (created): Docker network `alpha`, `vxlan100`, peer `10.0.1.22`; result `changes: 3 items`
->   - Column *same request again*: every check ticked as already there; result `changes: []`
->   - Column *after someone deleted the FDB entry*: only the peer check is red and gets re-added; result `changes: ["added peer 10.0.1.22"]`
->   - Above the columns, the thermostat analogy as a small icon: *set to 22°C*, not *heat for 10 minutes*
-> - **Takeaway (caption under the image):** The agent compares the request with what's on the node and only changes what's missing, so the same request is always safe to send.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
-
 ## Steps
 
 ### Step 1: Allocate tenant networks in the control plane
@@ -594,18 +582,6 @@ async def main():
 ```
 
 `asyncio.create_task` starts the heartbeat loop in the background. `server.serve()` then runs the web API in the same event loop until the service is stopped; at that point the heartbeat task is cancelled too. Port 5050 isn't open to the internet: the security group only allows it between the cluster's own machines.
-
-> **DIAGRAM PLACEHOLDER** `images/lab2-agent-two-jobs.png` (priority: low)
->
-> - **Title:** The agent now does two jobs in one process
-> - **Type:** one process box with two lanes sharing one event loop
-> - **Show:**
->   - Process box *agent.py (one asyncio event loop)*
->   - Lane 1 *in the background*: `heartbeats()`: every 10 s `POST /agents/node-01/heartbeat` to `control-01`
->   - Lane 2 *in front*: `uvicorn.Server` serving the agent's API on `:5050`; an incoming `PUT /networks/alpha` from `control-01` → token check → `setup_tenant_network` running on a **separate thread** (`asyncio.to_thread`) so the heartbeat lane keeps flowing
->   - Arrows: outgoing (heartbeats) agent → control plane; incoming (orders) control plane → agent, both protected by `X-Agent-Token`
-> - **Takeaway (caption under the image):** The agent now talks in both directions: it reports to the control plane, and takes orders from it.
-> - **Style:** match `images/lab2.png`: white background, rounded boxes, nodes light blue, tenant `alpha` green, tenant `beta` orange, `control-01` blue, the tunnel as a dashed blue pipe.
 
 Save the file.
 
